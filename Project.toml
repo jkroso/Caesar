@@ -1,0 +1,8 @@
+[deps]
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+PromptingTools = "670122d1-24a8-4d70-bfce-740807c42192"
+RAGTools = "16ddad29-bbe8-45a7-857d-3d9514eb0023"
+SQLite = "0aa819cd-b072-5ff4-a722-6bc24af294d9"
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
