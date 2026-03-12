@@ -76,6 +76,24 @@ function handle_reset()
   empty!(AUTO_ALLOWED_TOOLS)
 end
 
+function handle_restore_context(messages)
+  empty!(SESSION_HISTORY)
+  empty!(AUTO_ALLOWED_TOOLS)
+  for msg in messages
+    role = string(get(msg, :role, ""))
+    text = string(get(msg, :text, ""))
+    if role == "user"
+      push!(SESSION_HISTORY, PromptingTools.UserMessage(text))
+    elseif role == "agent"
+      push!(SESSION_HISTORY, PromptingTools.AIMessage(text))
+    end
+  end
+  # Keep only the last 20 entries (10 exchange pairs) like _run_agent does
+  if length(SESSION_HISTORY) > 20
+    splice!(SESSION_HISTORY, 1:length(SESSION_HISTORY)-20)
+  end
+end
+
 # ── Main loop ────────────────────────────────────────────────────────
 
 # Signal ready
@@ -121,6 +139,9 @@ while !eof(stdin)
       handle_mcp_list()
     elseif msg_type == "reset"
       handle_reset()
+    elseif msg_type == "restore_context"
+      messages = get(msg, :messages, [])
+      handle_restore_context(messages)
     elseif msg_type == "command"
       cmd_name = string(get(msg, :name, ""))
       cmd_args = string(get(msg, :args, ""))
