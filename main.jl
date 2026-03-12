@@ -44,10 +44,14 @@ SQLite.execute(DB, """
     role TEXT,
     content TEXT,
     embedding TEXT,
-    metadata TEXT DEFAULT '{}'
+    metadata TEXT DEFAULT '{}',
+    conversation_id TEXT DEFAULT NULL
   );
 """)
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timestamp);")
+# Migrate: add conversation_id column if missing (safe on new DBs too)
+try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
+SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id);")
 
 function _detect_schema()
   model = get(CONFIG, "llm", "")
@@ -90,49 +94,51 @@ function get_embedding(text::String)::Union{Vector{Float64}, Nothing}
 end
 
 # ============= EMBEDDINGS + RAGTOOLS MEMORY =============
-const MEMORY_INDEX = Ref{ChunkIndex}()
+const MEMORY_INDEXES = Dict{Union{String,Nothing}, ChunkIndex}()
 
-function rebuild_memory_index()
-  # Load all memory contents (source of truth = SQLite)
-  rows = map(SQLite.DBInterface.execute(DB, """
-    SELECT id, content FROM memories
-    ORDER BY timestamp DESC
-  """)) do row
+function rebuild_memory_index(; conversation_id::Union{String,Nothing}=nothing)
+  # Load memory contents filtered by conversation
+  query, params = if conversation_id !== nothing
+    "SELECT id, content FROM memories WHERE conversation_id = ? ORDER BY timestamp DESC", (conversation_id,)
+  else
+    "SELECT id, content FROM memories WHERE conversation_id IS NULL ORDER BY timestamp DESC", ()
+  end
+  rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
     (id=row.id, content=row.content)
   end
 
   if isempty(rows)
-    @info "No memories yet — index will be empty"
-    MEMORY_INDEX[] = build_index(["(empty memory)"]; chunker_kwargs=(; sources=["mem-0"]))
+    @info "No memories yet for conversation=$(something(conversation_id, "global"))"
+    MEMORY_INDEXES[conversation_id] = build_index(["(empty memory)"]; chunker_kwargs=(; sources=["mem-0"]))
     return
   end
 
   docs = [r.content for r in rows]
   sources = ["mem-$(r.id)" for r in rows]
 
-  # Build fresh index with short source labels (RAGTools requires < 512 chars)
-  MEMORY_INDEX[] = build_index(docs; chunker_kwargs=(; sources))
-  @info "RAG index rebuilt with $(length(docs)) memories"
+  MEMORY_INDEXES[conversation_id] = build_index(docs; chunker_kwargs=(; sources))
+  @info "RAG index rebuilt with $(length(docs)) memories for conversation=$(something(conversation_id, "global"))"
 end
 
-function log_memory(text::String; role::String="Agent", metadata=Dict())
+function log_memory(text::String; role::String="Agent", metadata=Dict(), conversation_id::Union{String,Nothing}=nothing)
   emb = get_embedding(text)  # keep for future hybrid use
   stmt = SQLite.Stmt(DB, """
-    INSERT INTO memories (timestamp, role, content, embedding, metadata)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO memories (timestamp, role, content, embedding, metadata, conversation_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   """)
-  SQLite.execute(stmt, (Dates.now(Dates.UTC), role, text, emb === nothing ? "" : JSON3.write(emb), JSON3.write(metadata)))
+  SQLite.execute(stmt, (Dates.now(Dates.UTC), role, text, emb === nothing ? "" : JSON3.write(emb), JSON3.write(metadata), conversation_id))
 
-  rebuild_memory_index()  # real-time update
+  rebuild_memory_index(; conversation_id)  # real-time update
 end
 
-function search_memories(query::String; limit::Int=5)::String
-  if !isassigned(MEMORY_INDEX) || isempty(MEMORY_INDEX[].chunks)
+function search_memories(query::String; limit::Int=5, conversation_id::Union{String,Nothing}=nothing)::String
+  index = get(MEMORY_INDEXES, conversation_id, nothing)
+  if index === nothing || isempty(index.chunks)
     return "(no memories yet)"
   end
 
   try
-    result = retrieve(MEMORY_INDEX[], query; top_k=limit)
+    result = retrieve(index, query; top_k=limit)
     ctx = result.context
     isempty(ctx) && return "(no relevant memories)"
     "=== Relevant past memories ===\n" * join(ctx, "\n\n")
@@ -142,12 +148,14 @@ function search_memories(query::String; limit::Int=5)::String
   end
 end
 
-function prune_memories(;older_than_days::Int=30, batch_size::Int=50)
+function prune_memories(;older_than_days::Int=30, batch_size::Int=50, conversation_id::Union{String,Nothing}=nothing)
   cutoff = Dates.now(Dates.UTC) - Dates.Day(older_than_days)
-  rows = map(SQLite.DBInterface.execute(DB, """
-    SELECT id, role, content FROM memories
-    WHERE timestamp < ? ORDER BY timestamp ASC LIMIT ?
-  """, (string(cutoff), batch_size))) do row
+  query, params = if conversation_id !== nothing
+    "SELECT id, role, content FROM memories WHERE conversation_id = ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (conversation_id, string(cutoff), batch_size)
+  else
+    "SELECT id, role, content FROM memories WHERE conversation_id IS NULL AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (string(cutoff), batch_size)
+  end
+  rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
     (id=row.id, role=row.role, content=row.content)
   end
 
@@ -162,13 +170,13 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50)
   ids = join([string(r.id) for r in rows], ",")
   SQLite.execute(DB, "DELETE FROM memories WHERE id IN ($ids)")
 
-  rebuild_memory_index()          # ← crucial for RAGTools
-  log_memory("Memory consolidation: $summary"; role="System")
+  rebuild_memory_index(; conversation_id)
+  log_memory("Memory consolidation: $summary"; role="System", conversation_id)
 
-  "✅ Pruned $(length(rows)) old memories into one summary."
+  "Pruned $(length(rows)) old memories into one summary."
 end
 
-# Build index on startup
+# Build index on startup (global memories only — per-conversation indexes built on demand)
 rebuild_memory_index()
 
 # ============= TOOLS =============
@@ -381,9 +389,11 @@ function call_llm(messages)::String
   resp.content
 end
 
-function run_agent(user_input::String, outbox::Channel, inbox::Channel)
+function run_agent(user_input::String, outbox::Channel, inbox::Channel;
+                   session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
+                   conversation_id::Union{String,Nothing}=nothing)
   try
-    _run_agent(user_input, outbox, inbox)
+    _run_agent(user_input, outbox, inbox; session_history, auto_allowed, conversation_id)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -391,8 +401,10 @@ function run_agent(user_input::String, outbox::Channel, inbox::Channel)
   end
 end
 
-function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
-  log_memory("User: $user_input"; role="User")
+function _run_agent(user_input::String, outbox::Channel, inbox::Channel;
+                    session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
+                    conversation_id::Union{String,Nothing}=nothing)
+  log_memory("User: $user_input"; role="User", conversation_id)
 
   # Check for /skill-name prefix
   active_skill = nothing
@@ -406,10 +418,10 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
     end
   end
 
-  memories = search_memories(user_input)  # now powered by RAGTools
+  memories = search_memories(user_input; conversation_id)  # now powered by RAGTools
   messages = PromptingTools.AbstractMessage[PromptingTools.SystemMessage(build_system_prompt(;active_skill))]
 
-  window = SESSION_HISTORY[max(1, end-19):end]  # last 10 exchange pairs
+  window = session_history[max(1, end-19):end]  # last 10 exchange pairs
   append!(messages, window)
   push!(messages, PromptingTools.UserMessage("$memories\n\nTask: $user_input"))
 
@@ -466,13 +478,13 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
       end
       # LLM responded with plain text — treat as final answer
       put!(outbox, AgentMessage(response_text))
-      log_memory("Agent: $response_text")
+      log_memory("Agent: $response_text"; conversation_id)
       break
     end
 
     if haskey(parsed, :final_answer)
       put!(outbox, AgentMessage(parsed.final_answer))
-      log_memory("Agent: $(parsed.final_answer)")
+      log_memory("Agent: $(parsed.final_answer)"; conversation_id)
       break
     end
 
@@ -518,7 +530,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
     # Determine if confirmation is needed
     needs_confirm = false
     if is_builtin
-      needs_confirm = tn in TOOL_CONFIRM && tn ∉ AUTO_ALLOWED_TOOLS
+      needs_confirm = tn in TOOL_CONFIRM && tn ∉ auto_allowed
     elseif mcp_server !== nothing
       if mcp_server.is_runtime
         # Runtime server: no confirmation unless ex fails validation
@@ -531,7 +543,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
         end
       else
         # Non-runtime MCP: always confirm unless auto-allowed
-        needs_confirm = tn ∉ AUTO_ALLOWED_TOOLS
+        needs_confirm = tn ∉ auto_allowed
       end
     end
 
@@ -541,7 +553,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
       approval = take!(inbox)
       if approval isa ToolApproval && approval.id == req_id
         if approval.decision == :always
-          push!(AUTO_ALLOWED_TOOLS, tn)
+          push!(auto_allowed, tn)
         elseif approval.decision == :deny
           push!(messages, PromptingTools.AIMessage(response_text))
           push!(messages, PromptingTools.UserMessage("Tool call to '$tn' was denied by user. Try a different approach or ask the user."))
@@ -567,7 +579,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
     end
     @info "Tool result: $(result[1:min(200, end)])"
     put!(outbox, ToolResult(tn, result))
-    log_memory("Tool: $tn($args_str) → $(result[1:min(500, end)])")
+    log_memory("Tool: $tn($args_str) → $(result[1:min(500, end)])"; conversation_id)
 
     push!(messages, PromptingTools.AIMessage(response_text))
     push!(messages, PromptingTools.UserMessage("Tool result: $result"))
@@ -576,11 +588,11 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
   put!(outbox, AgentDone())
 
   # Save exchange to session history for continuity
-  push!(SESSION_HISTORY, PromptingTools.UserMessage(user_input))
+  push!(session_history, PromptingTools.UserMessage(user_input))
   # Find the last AIMessage (not a UserMessage like "Tool result: ...")
   for i in length(messages):-1:1
     if messages[i] isa PromptingTools.AIMessage
-      push!(SESSION_HISTORY, messages[i])
+      push!(session_history, messages[i])
       break
     end
   end
