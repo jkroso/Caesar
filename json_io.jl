@@ -76,6 +76,15 @@ function handle_reset()
   empty!(AUTO_ALLOWED_TOOLS)
 end
 
+function handle_generate_title(text::String)
+  messages = PromptingTools.AbstractMessage[
+    PromptingTools.SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
+    PromptingTools.UserMessage(text)
+  ]
+  title = strip(call_llm(messages))
+  emit(Dict("type" => "title", "title" => title))
+end
+
 function handle_restore_context(messages)
   empty!(SESSION_HISTORY)
   empty!(AUTO_ALLOWED_TOOLS)
@@ -142,6 +151,9 @@ while !eof(stdin)
     elseif msg_type == "restore_context"
       messages = get(msg, :messages, [])
       handle_restore_context(messages)
+    elseif msg_type == "generate_title"
+      text = string(get(msg, :text, ""))
+      @async handle_generate_title(text)
     elseif msg_type == "command"
       cmd_name = string(get(msg, :name, ""))
       cmd_args = string(get(msg, :args, ""))
