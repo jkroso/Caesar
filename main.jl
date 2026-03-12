@@ -438,11 +438,14 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel)
     if m !== nothing
       json_str = strip(m.captures[1])
     end
-    # Extract first {...} block if there's surrounding text
+    # Find last line that looks like a JSON object
     if !startswith(json_str, "{")
-      m2 = match(r"\{.*\}"s, json_str)
-      if m2 !== nothing
-        json_str = m2.match
+      for line in reverse(split(json_str, '\n'))
+        stripped = strip(line)
+        if startswith(stripped, "{") && endswith(stripped, "}")
+          json_str = stripped
+          break
+        end
       end
     end
 
