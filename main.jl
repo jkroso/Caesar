@@ -246,7 +246,7 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50, conversati
   summary = call_llm([
     PromptingTools.SystemMessage("Summarize these memories into a concise paragraph preserving key facts and decisions:"),
     PromptingTools.UserMessage(texts)
-  ])
+  ]).content
 
   ids = join([string(r.id) for r in rows], ",")
   SQLite.execute(DB, "DELETE FROM memories WHERE id IN ($ids)")
@@ -461,13 +461,46 @@ const AUTO_ALLOWED_TOOLS = Set{String}()
 # TODO: streaming (streamcallback=stdout) doesn't pair well with JSON tool dispatch
 # in a ReAct loop — the raw JSON gets streamed before we can parse it. Revisit if
 # switching to a structured output / function-calling API.
-function call_llm(messages)::String
+struct LlmResult
+  content::String
+  input_tokens::Int
+  output_tokens::Int
+end
+
+function _detect_schema_for(model::String)
+  if startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
+    PromptingTools.OpenAISchema()
+  elseif startswith(model, "claude-")
+    PromptingTools.AnthropicSchema()
+  elseif startswith(model, "gemini-")
+    PromptingTools.GoogleSchema()
+  elseif startswith(model, "mistral-")
+    PromptingTools.MistralOpenAISchema()
+  elseif startswith(model, "deepseek-")
+    PromptingTools.DeepSeekOpenAISchema()
+  elseif startswith(model, "grok-")
+    PromptingTools.XAIOpenAISchema()
+  else
+    PromptingTools.OllamaSchema()
+  end
+end
+
+function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing)::LlmResult
   temperature = get(CONFIG, "temperature", 0.7)
   timeout = get(CONFIG, "llm_timeout", 60)
-  resp = PromptingTools.aigenerate(LLM_SCHEMA[], messages;
-    model=CONFIG["llm"], temperature,
+  use_model = model !== nothing ? model : CONFIG["llm"]
+  use_schema = schema !== nothing ? schema : LLM_SCHEMA[]
+  # If a custom model is provided without a schema, detect it
+  if model !== nothing && schema === nothing
+    use_schema = _detect_schema_for(model)
+  end
+  resp = PromptingTools.aigenerate(use_schema, messages;
+    model=use_model, temperature,
     http_kwargs=(; retry_non_idempotent=false, retries=0, readtimeout=timeout))
-  resp.content
+  # Extract token usage from response
+  input_tokens = try get(resp.run_info, :prompt_tokens, 0) catch; 0 end
+  output_tokens = try get(resp.run_info, :completion_tokens, 0) catch; 0 end
+  LlmResult(resp.content, input_tokens, output_tokens)
 end
 
 function run_agent(user_input::String, outbox::Channel, inbox::Channel;
@@ -517,7 +550,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel;
     end
 
     response_text = try
-      call_llm(messages)
+      call_llm(messages).content
     catch e
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
       break
