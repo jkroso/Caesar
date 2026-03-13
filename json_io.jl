@@ -258,6 +258,234 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
   end
 end
 
+# ── Project CRUD ─────────────────────────────────────────────────────
+
+function handle_projects_list()
+  rows = SQLite.DBInterface.execute(DB, """
+    SELECT p.*, (SELECT COUNT(*) FROM routines WHERE project_id=p.id) as routine_count
+    FROM projects p ORDER BY is_default DESC, name ASC
+  """) |> SQLite.rowtable
+  data = [Dict(
+    "id" => r.id, "name" => r.name, "path" => r.path,
+    "is_default" => r.is_default == 1, "model" => something(r.model, nothing),
+    "idle_check_mins" => r.idle_check_mins, "tokens_used" => r.tokens_used,
+    "cost_usd" => r.cost_usd, "last_checked_at" => something(r.last_checked_at, nothing),
+    "created_at" => r.created_at, "routine_count" => r.routine_count
+  ) for r in rows]
+  emit(Dict("type" => "projects", "data" => data))
+end
+
+function handle_project_create(msg)
+  name = string(get(msg, :name, ""))
+  path = string(get(msg, :path, ""))
+  model = let v = get(msg, :model, nothing); v === nothing ? nothing : string(v) end
+  idle_mins = get(msg, :idle_check_mins, 30)
+
+  isempty(name) && (emit(Dict("type" => "error", "text" => "Project name required")); return)
+  isempty(path) && (emit(Dict("type" => "error", "text" => "Project path required")); return)
+
+  path = endswith(path, "/") ? path : path * "/"
+  mkpath(path)
+
+  if !isfile(joinpath(path, "Project.md"))
+    write(joinpath(path, "Project.md"), "# $name\n\n## Goals\n\n- \n")
+  end
+
+  id = string(UUIDs.uuid4())
+  SQLite.execute(DB, """
+    INSERT INTO projects (id, name, path, model, idle_check_mins, created_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+  """, (id, name, path, model, idle_mins))
+
+  handle_projects_list()
+end
+
+function handle_project_update(msg)
+  id = string(get(msg, :id, ""))
+  isempty(id) && return
+
+  sets = String[]
+  vals = Any[]
+  for (key, col) in [(:name, "name"), (:model, "model"), (:idle_check_mins, "idle_check_mins")]
+    v = get(msg, key, nothing)
+    if v !== nothing
+      push!(sets, "$col=?")
+      push!(vals, key == :model && v == "" ? nothing : v)
+    end
+  end
+  isempty(sets) && return
+  push!(vals, id)
+  SQLite.execute(DB, "UPDATE projects SET $(join(sets, ", ")) WHERE id=?", vals)
+  handle_projects_list()
+end
+
+function handle_project_delete(msg)
+  id = string(get(msg, :id, ""))
+  rows = SQLite.DBInterface.execute(DB, "SELECT is_default FROM projects WHERE id=?", (id,)) |> columntable
+  if length(rows.is_default) > 0 && rows.is_default[1] == 1
+    emit(Dict("type" => "error", "text" => "Cannot delete the default project"))
+    return
+  end
+  SQLite.execute(DB, "DELETE FROM routine_runs WHERE project_id=?", (id,))
+  SQLite.execute(DB, "DELETE FROM routines WHERE project_id=?", (id,))
+  SQLite.execute(DB, "DELETE FROM projects WHERE id=?", (id,))
+  handle_projects_list()
+end
+
+# ── Routine CRUD ─────────────────────────────────────────────────────
+
+function handle_routines_list(msg)
+  project_id = let v = get(msg, :project_id, nothing); v === nothing ? nothing : string(v) end
+  query = if project_id !== nothing
+    SQLite.DBInterface.execute(DB, """
+      SELECT r.*, p.name as project_name FROM routines r
+      JOIN projects p ON r.project_id = p.id
+      WHERE r.project_id=? ORDER BY r.created_at
+    """, (project_id,))
+  else
+    SQLite.DBInterface.execute(DB, """
+      SELECT r.*, p.name as project_name FROM routines r
+      JOIN projects p ON r.project_id = p.id
+      ORDER BY p.is_default DESC, p.name, r.created_at
+    """)
+  end
+  rows = query |> SQLite.rowtable
+  data = [Dict(
+    "id" => r.id, "project_id" => r.project_id, "project_name" => r.project_name,
+    "name" => r.name, "prompt" => r.prompt, "model" => something(r.model, nothing),
+    "schedule_natural" => something(r.schedule_natural, nothing),
+    "schedule_cron" => something(r.schedule_cron, nothing),
+    "enabled" => r.enabled == 1, "tokens_used" => r.tokens_used,
+    "cost_usd" => r.cost_usd, "last_run_at" => something(r.last_run_at, nothing),
+    "next_run_at" => something(r.next_run_at, nothing),
+    "created_at" => r.created_at
+  ) for r in rows]
+  emit(Dict("type" => "routines", "data" => data))
+end
+
+function handle_routine_create(msg)
+  project_id = string(get(msg, :project_id, ""))
+  name = string(get(msg, :name, ""))
+  prompt = string(get(msg, :prompt, ""))
+  schedule_natural = string(get(msg, :schedule_natural, ""))
+  model = let v = get(msg, :model, nothing); v === nothing ? nothing : string(v) end
+
+  isempty(project_id) && (emit(Dict("type" => "error", "text" => "Project required")); return)
+  isempty(name) && (emit(Dict("type" => "error", "text" => "Routine name required")); return)
+  isempty(prompt) && (emit(Dict("type" => "error", "text" => "Routine prompt required")); return)
+
+  schedule_cron = nothing
+  next_run = nothing
+  if !isempty(schedule_natural)
+    parse_prompt = """Convert this natural language schedule to a standard 5-field cron expression.
+Reply with ONLY the cron expression, nothing else. Examples:
+- "every morning at 8am" → "0 8 * * *"
+- "every 2 hours" → "0 */2 * * *"
+- "weekday mornings at 9" → "0 9 * * 1-5"
+
+Schedule: $schedule_natural"""
+    parse_msgs = [PromptingTools.SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
+                  PromptingTools.UserMessage(parse_prompt)]
+    result = try
+      call_llm(parse_msgs).content
+    catch e
+      emit(Dict("type" => "error", "text" => "Failed to parse schedule: $(sprint(showerror, e))"))
+      return
+    end
+    schedule_cron = strip(result)
+    try
+      next_run = string(Scheduler.next_cron_time_utc(schedule_cron, now(Dates.UTC)))
+    catch e
+      emit(Dict("type" => "error", "text" => "Invalid cron expression '$schedule_cron': $(sprint(showerror, e))"))
+      return
+    end
+  end
+
+  id = string(UUIDs.uuid4())
+  SQLite.execute(DB, """
+    INSERT INTO routines (id, project_id, name, prompt, model, schedule_natural, schedule_cron, next_run_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  """, (id, project_id, name, prompt, model, schedule_natural, schedule_cron, next_run))
+
+  handle_routines_list(msg)
+end
+
+function handle_routine_update(msg)
+  id = string(get(msg, :id, ""))
+  isempty(id) && return
+
+  sets = String[]
+  vals = Any[]
+  for (key, col) in [(:name, "name"), (:prompt, "prompt"), (:model, "model"), (:enabled, "enabled")]
+    v = get(msg, key, nothing)
+    if v !== nothing
+      push!(sets, "$col=?")
+      push!(vals, key == :enabled ? (v ? 1 : 0) : (key == :model && v == "" ? nothing : v))
+    end
+  end
+
+  schedule_natural = get(msg, :schedule_natural, nothing)
+  if schedule_natural !== nothing
+    sn = string(schedule_natural)
+    push!(sets, "schedule_natural=?")
+    push!(vals, sn)
+    if !isempty(sn)
+      parse_msgs = [PromptingTools.SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
+                    PromptingTools.UserMessage("Convert to cron: $sn")]
+      cron_str = strip(call_llm(parse_msgs).content)
+      push!(sets, "schedule_cron=?")
+      push!(vals, cron_str)
+      next_run = string(Scheduler.next_cron_time_utc(cron_str, now(Dates.UTC)))
+      push!(sets, "next_run_at=?")
+      push!(vals, next_run)
+    end
+  end
+
+  isempty(sets) && return
+  push!(vals, id)
+  SQLite.execute(DB, "UPDATE routines SET $(join(sets, ", ")) WHERE id=?", vals)
+  handle_routines_list(msg)
+end
+
+function handle_routine_delete(msg)
+  id = string(get(msg, :id, ""))
+  SQLite.execute(DB, "DELETE FROM routine_runs WHERE routine_id=?", (id,))
+  SQLite.execute(DB, "DELETE FROM routines WHERE id=?", (id,))
+  handle_routines_list(msg)
+end
+
+function handle_routine_runs_list(msg)
+  project_id = let v = get(msg, :project_id, nothing); v === nothing ? nothing : string(v) end
+  unseen_only = get(msg, :unseen_only, false)
+
+  conditions = String[]
+  params = Any[]
+  project_id !== nothing && (push!(conditions, "project_id=?"); push!(params, project_id))
+  unseen_only && (push!(conditions, "notable=1 AND seen=0"))
+
+  where = isempty(conditions) ? "" : "WHERE " * join(conditions, " AND ")
+  rows = SQLite.DBInterface.execute(DB,
+    "SELECT * FROM routine_runs $where ORDER BY started_at DESC LIMIT 100", params) |> SQLite.rowtable
+
+  data = [Dict(
+    "id" => r.id, "routine_id" => something(r.routine_id, nothing),
+    "project_id" => r.project_id, "started_at" => r.started_at,
+    "finished_at" => r.finished_at, "result" => r.result,
+    "tokens_used" => r.tokens_used, "cost_usd" => r.cost_usd,
+    "notable" => r.notable == 1, "seen" => r.seen == 1
+  ) for r in rows]
+  emit(Dict("type" => "routine_runs", "data" => data))
+end
+
+function handle_routine_runs_mark_seen(msg)
+  ids = get(msg, :ids, [])
+  for id in ids
+    SQLite.execute(DB, "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
+  end
+  count = Scheduler.unseen_notable_count(DB)
+  emit(Dict("type" => "unseen_count", "count" => count))
+end
+
 # ── Scheduler ─────────────────────────────────────────────────────────
 
 function scheduler_tick!()
@@ -512,6 +740,26 @@ while !eof(stdin)
       else
         emit(Dict("type" => "error", "text" => "Unknown command: $cmd_name"))
       end
+    elseif msg_type == "projects_list"
+      handle_projects_list()
+    elseif msg_type == "project_create"
+      handle_project_create(msg)
+    elseif msg_type == "project_update"
+      handle_project_update(msg)
+    elseif msg_type == "project_delete"
+      handle_project_delete(msg)
+    elseif msg_type == "routines_list"
+      handle_routines_list(msg)
+    elseif msg_type == "routine_create"
+      handle_routine_create(msg)
+    elseif msg_type == "routine_update"
+      handle_routine_update(msg)
+    elseif msg_type == "routine_delete"
+      handle_routine_delete(msg)
+    elseif msg_type == "routine_runs_list"
+      handle_routine_runs_list(msg)
+    elseif msg_type == "routine_runs_mark_seen"
+      handle_routine_runs_mark_seen(msg)
     else
       emit(Dict("type" => "error", "text" => "Unknown message type: $msg_type"))
     end
