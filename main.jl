@@ -110,7 +110,7 @@ SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routi
 
 let rows = SQLite.DBInterface.execute(DB, "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> SQLite.rowtable
   if rows[1].c == 0
-    personal_path = string(HOME, "personal/")
+    personal_path = joinpath(string(HOME), "personal") * "/"
     mkpath(personal_path)
     if !isfile(joinpath(personal_path, "Project.md"))
       write(joinpath(personal_path, "Project.md"), """
