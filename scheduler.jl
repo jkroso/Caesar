@@ -34,7 +34,7 @@ struct CronExpr
   weekdays::Set{Int}   # 0-6 (0=Sunday)
 end
 
-function parse_cron_field(field::String, min_val::Int, max_val::Int)::Set{Int}
+function parse_cron_field(field::AbstractString, min_val::Int, max_val::Int)::Set{Int}
   result = Set{Int}()
   for part in split(field, ',')
     part = strip(part)
@@ -108,9 +108,9 @@ function resolve_model(db::SQLite.DB, routine_model, project_id::String, global_
     return string(routine_model)
   end
   # Look up project model
-  rows = SQLite.DBInterface.execute(db, "SELECT model FROM projects WHERE id=?", (project_id,)) |> columntable
-  if length(rows.model) > 0 && rows.model[1] !== missing && rows.model[1] !== nothing && rows.model[1] !== ""
-    return string(rows.model[1])
+  rows = SQLite.DBInterface.execute(db, "SELECT model FROM projects WHERE id=?", (project_id,)) |> SQLite.rowtable
+  if length(rows) > 0 && rows[1].model !== missing && rows[1].model !== nothing && rows[1].model !== ""
+    return string(rows[1].model)
   end
   global_model
 end
@@ -119,8 +119,8 @@ end
 
 function unseen_notable_count(db::SQLite.DB)::Int
   rows = SQLite.DBInterface.execute(db,
-    "SELECT COUNT(*) as c FROM routine_runs WHERE notable=1 AND seen=0") |> columntable
-  rows.c[1]
+    "SELECT COUNT(*) as c FROM routine_runs WHERE notable=1 AND seen=0") |> SQLite.rowtable
+  rows[1].c
 end
 
 end # module

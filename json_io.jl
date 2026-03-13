@@ -9,6 +9,7 @@
 include("main.jl")
 include("scheduler.jl")
 using .Scheduler
+using Dates: DateTime, now
 
 const AGENT_LOCK = ReentrantLock()
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
@@ -321,8 +322,8 @@ end
 
 function handle_project_delete(msg)
   id = string(get(msg, :id, ""))
-  rows = SQLite.DBInterface.execute(DB, "SELECT is_default FROM projects WHERE id=?", (id,)) |> columntable
-  if length(rows.is_default) > 0 && rows.is_default[1] == 1
+  rows = SQLite.DBInterface.execute(DB, "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
+  if length(rows) > 0 && rows[1].is_default == 1
     emit(Dict("type" => "error", "text" => "Cannot delete the default project"))
     return
   end

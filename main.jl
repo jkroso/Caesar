@@ -108,8 +108,8 @@ SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id);")
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routine_runs(notable, seen);")
 
-let personal_count = SQLite.DBInterface.execute(DB, "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> columntable
-  if personal_count.c[1] == 0
+let rows = SQLite.DBInterface.execute(DB, "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> SQLite.rowtable
+  if rows[1].c == 0
     personal_path = string(HOME, "personal/")
     mkpath(personal_path)
     if !isfile(joinpath(personal_path, "Project.md"))
