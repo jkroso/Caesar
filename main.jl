@@ -9,6 +9,7 @@
 @use HTTP
 @use YAML
 @use Logging
+@use UUIDs
 
 include("events.jl")
 include("mcp_client.jl")
@@ -52,6 +53,86 @@ SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timesta
 # Migrate: add conversation_id column if missing (safe on new DBs too)
 try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id);")
+
+SQLite.execute(DB, """
+  CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    is_default INTEGER DEFAULT 0,
+    model TEXT,
+    idle_check_mins INTEGER DEFAULT 30,
+    tokens_used INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    last_checked_at TEXT,
+    created_at TEXT,
+    metadata TEXT DEFAULT '{}'
+  );
+""")
+
+SQLite.execute(DB, """
+  CREATE TABLE IF NOT EXISTS routines (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    model TEXT,
+    schedule_natural TEXT,
+    schedule_cron TEXT,
+    enabled INTEGER DEFAULT 1,
+    tokens_used INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    created_at TEXT,
+    metadata TEXT DEFAULT '{}'
+  );
+""")
+
+SQLite.execute(DB, """
+  CREATE TABLE IF NOT EXISTS routine_runs (
+    id INTEGER PRIMARY KEY,
+    routine_id TEXT REFERENCES routines(id),
+    project_id TEXT REFERENCES projects(id),
+    started_at TEXT,
+    finished_at TEXT,
+    result TEXT,
+    tokens_used INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    notable INTEGER DEFAULT 0,
+    seen INTEGER DEFAULT 0
+  );
+""")
+
+SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(project_id);")
+SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id);")
+SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routine_runs(notable, seen);")
+
+let personal_count = SQLite.DBInterface.execute(DB, "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> columntable
+  if personal_count.c[1] == 0
+    personal_path = string(HOME, "personal/")
+    mkpath(personal_path)
+    if !isfile(joinpath(personal_path, "Project.md"))
+      write(joinpath(personal_path, "Project.md"), """
+      # Personal Project
+
+      This is your default project for general routines and tasks.
+
+      ## Goals
+
+      - Add your personal goals here
+
+      ## Routines
+
+      - Routines you create without a specific project will be added here
+      """)
+    end
+    SQLite.execute(DB, """
+      INSERT INTO projects (id, name, path, is_default, created_at)
+      VALUES (?, 'Personal', ?, 1, datetime('now'))
+    """, (string(UUIDs.uuid4()), personal_path))
+  end
+end
 
 function _detect_schema()
   model = get(CONFIG, "llm", "")
