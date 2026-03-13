@@ -7,6 +7,11 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 include("main.jl")
+include("scheduler.jl")
+using .Scheduler
+
+const AGENT_LOCK = ReentrantLock()
+const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
 mutable struct GUIConversation
   history::Vector{PromptingTools.AbstractMessage}
@@ -253,7 +258,180 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
   end
 end
 
+# ── Scheduler ─────────────────────────────────────────────────────────
+
+function scheduler_tick!()
+  # Only run if agent is idle
+  trylock(AGENT_LOCK) || return
+  try
+    _scheduler_tick!()
+  catch e
+    @error "Scheduler tick error" exception=(e, catch_backtrace())
+  finally
+    unlock(AGENT_LOCK)
+  end
+end
+
+function _scheduler_tick!()
+  now_utc = now(Dates.UTC)
+
+  # 1. Run due routines
+  due = SQLite.DBInterface.execute(DB, """
+    SELECT r.*, p.path as project_path, p.model as project_model
+    FROM routines r JOIN projects p ON r.project_id = p.id
+    WHERE r.enabled=1 AND r.next_run_at IS NOT NULL AND r.next_run_at <= ?
+  """, (string(now_utc),)) |> SQLite.rowtable
+
+  for routine in due
+    _run_routine(routine, now_utc)
+  end
+
+  # 2. Idle project check-ins
+  idle_secs = Dates.value(now_utc - last_user_activity_at[]) / 1000
+  projects = SQLite.DBInterface.execute(DB, "SELECT * FROM projects") |> SQLite.rowtable
+
+  for proj in projects
+    idle_mins = something(proj.idle_check_mins, 30)
+    if idle_secs >= idle_mins * 60
+      last_checked = proj.last_checked_at
+      if last_checked === missing || last_checked === nothing ||
+         Dates.value(now_utc - DateTime(string(last_checked))) / 1000 >= idle_mins * 60
+        _run_project_checkin(proj, now_utc)
+      end
+    end
+  end
+end
+
+function _run_routine(routine, now_utc::DateTime)
+  model = Scheduler.resolve_model(DB, routine.model, string(routine.project_id), CONFIG["llm"])
+  project_md_path = joinpath(string(routine.project_path), "Project.md")
+  context = isfile(project_md_path) ? read(project_md_path, String) : ""
+
+  prompt = """You are running a scheduled routine for a project.
+
+Project context (from Project.md):
+$context
+
+Routine task: $(routine.prompt)
+
+Execute this task. At the end, on a new line, write either NOTABLE:true or NOTABLE:false to indicate whether the result is actionable or noteworthy for the user."""
+
+  messages = [PromptingTools.SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
+              PromptingTools.UserMessage(prompt)]
+
+  started_at = string(now(Dates.UTC))
+  result_obj = try
+    call_llm(messages; model)
+  catch e
+    @error "Routine execution failed" routine_id=routine.id exception=e
+    LlmResult("Error: $(sprint(showerror, e))", 0, 0)
+  end
+
+  content = result_obj.content
+  notable = occursin("NOTABLE:true", content) ? 1 : 0
+  clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
+
+  cost = Scheduler.compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
+  total_tokens = result_obj.input_tokens + result_obj.output_tokens
+  finished_at = string(now(Dates.UTC))
+
+  # Store run
+  SQLite.execute(DB, """
+    INSERT INTO routine_runs (routine_id, project_id, started_at, finished_at, result, tokens_used, cost_usd, notable)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  """, (routine.id, routine.project_id, started_at, finished_at, clean_result, total_tokens, cost, notable))
+
+  # Update routine counters
+  SQLite.execute(DB, """
+    UPDATE routines SET last_run_at=?, tokens_used=tokens_used+?, cost_usd=cost_usd+?
+    WHERE id=?
+  """, (finished_at, total_tokens, cost, routine.id))
+
+  # Compute next run
+  if routine.schedule_cron !== missing && routine.schedule_cron !== nothing
+    next_at = Scheduler.next_cron_time_utc(string(routine.schedule_cron), now_utc)
+    SQLite.execute(DB, "UPDATE routines SET next_run_at=? WHERE id=?",
+                   (string(next_at), routine.id))
+  end
+
+  # Update project counters
+  SQLite.execute(DB, """
+    UPDATE projects SET tokens_used=tokens_used+?, cost_usd=cost_usd+?
+    WHERE id=?
+  """, (total_tokens, cost, routine.project_id))
+
+  # Emit notification if notable
+  if notable == 1
+    emit(Dict("type" => "notification", "text" => clean_result,
+              "project_id" => routine.project_id, "routine_id" => routine.id))
+    count = Scheduler.unseen_notable_count(DB)
+    emit(Dict("type" => "unseen_count", "count" => count))
+  end
+end
+
+function _run_project_checkin(project, now_utc::DateTime)
+  model = project.model !== missing && project.model !== nothing ? string(project.model) : CONFIG["llm"]
+  project_md_path = joinpath(string(project.path), "Project.md")
+  if !isfile(project_md_path)
+    @warn "Project.md not found" path=project_md_path
+    return
+  end
+  context = read(project_md_path, String)
+
+  prompt = """You are reviewing a project to see if there's anything you can do to move it forward.
+
+Project: $(project.name)
+Path: $(project.path)
+
+Project.md contents:
+$context
+
+Review this project and determine if there's anything you can do to help move it forward. If nothing needs doing, say so briefly. At the end, on a new line, write either NOTABLE:true or NOTABLE:false."""
+
+  messages = [PromptingTools.SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
+              PromptingTools.UserMessage(prompt)]
+
+  started_at = string(now(Dates.UTC))
+  result_obj = try
+    call_llm(messages; model)
+  catch e
+    @error "Project check-in failed" project_id=project.id exception=e
+    return
+  end
+
+  content = result_obj.content
+  notable = occursin("NOTABLE:true", content) ? 1 : 0
+  clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
+  cost = Scheduler.compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
+  total_tokens = result_obj.input_tokens + result_obj.output_tokens
+  finished_at = string(now(Dates.UTC))
+
+  # Store as routine_run with NULL routine_id
+  SQLite.execute(DB, """
+    INSERT INTO routine_runs (routine_id, project_id, started_at, finished_at, result, tokens_used, cost_usd, notable)
+    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)
+  """, (project.id, started_at, finished_at, clean_result, total_tokens, cost, notable))
+
+  # Update project
+  SQLite.execute(DB, """
+    UPDATE projects SET last_checked_at=?, tokens_used=tokens_used+?, cost_usd=cost_usd+?
+    WHERE id=?
+  """, (finished_at, total_tokens, cost, project.id))
+
+  if notable == 1
+    emit(Dict("type" => "notification", "text" => clean_result, "project_id" => project.id))
+    count = Scheduler.unseen_notable_count(DB)
+    emit(Dict("type" => "unseen_count", "count" => count))
+  end
+end
+
 # ── Main loop ────────────────────────────────────────────────────────
+
+# Start scheduler timer (ticks every 60 seconds)
+const SCHEDULER_TIMER = Timer(t -> scheduler_tick!(), 60; interval=60)
+
+# Emit initial unseen count
+emit(Dict("type" => "unseen_count", "count" => Scheduler.unseen_notable_count(DB)))
 
 # Signal ready
 emit(Dict("type" => "ready"))
@@ -278,10 +456,18 @@ while !eof(stdin)
   try
     if msg_type == "user_message"
       text = string(get(msg, :text, ""))
+      last_user_activity_at[] = now(Dates.UTC)
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id)
-      @async run_agent(text, conv.outbox, conv.inbox;
-                       session_history=conv.history, auto_allowed=conv.auto_allowed,
-                       conversation_id=conv_id)
+      @async begin
+        lock(AGENT_LOCK)
+        try
+          run_agent(text, conv.outbox, conv.inbox;
+                    session_history=conv.history, auto_allowed=conv.auto_allowed,
+                    conversation_id=conv_id)
+        finally
+          unlock(AGENT_LOCK)
+        end
+      end
       @async handle_events(conv.outbox; conversation_id=conv_id)
     elseif msg_type == "tool_approval"
       id = parse(UInt64, string(get(msg, :id, "0")))
