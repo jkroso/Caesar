@@ -366,34 +366,61 @@ end
 
 function handle_routine_create(msg)
   project_id = string(get(msg, :project_id, ""))
-  name = string(get(msg, :name, ""))
   prompt = string(get(msg, :prompt, ""))
   schedule_natural = string(get(msg, :schedule_natural, ""))
   model = let v = get(msg, :model, nothing); v === nothing ? nothing : string(v) end
 
   isempty(project_id) && (emit(Dict("type" => "error", "text" => "Project required")); return)
-  isempty(name) && (emit(Dict("type" => "error", "text" => "Routine name required")); return)
   isempty(prompt) && (emit(Dict("type" => "error", "text" => "Routine prompt required")); return)
 
-  schedule_cron = nothing
-  next_run = nothing
+  # Generate name + parse schedule in a single LLM call
+  gen_prompt = """Given this routine prompt, generate a short name (2-5 words) for it."""
   if !isempty(schedule_natural)
-    parse_prompt = """Convert this natural language schedule to a standard 5-field cron expression.
-Reply with ONLY the cron expression, nothing else. Examples:
-- "every morning at 8am" → "0 8 * * *"
-- "every 2 hours" → "0 */2 * * *"
-- "weekday mornings at 9" → "0 9 * * 1-5"
+    gen_prompt *= """
+
+Also convert this schedule to a standard 5-field cron expression.
+
+Reply in this exact format (two lines):
+NAME: <short name>
+CRON: <cron expression>
+
+Examples:
+- "every morning at 8am" → CRON: 0 8 * * *
+- "every 2 hours" → CRON: 0 */2 * * *
+- "weekday mornings at 9" → CRON: 0 9 * * 1-5
 
 Schedule: $schedule_natural"""
-    parse_msgs = [PromptingTools.SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
-                  PromptingTools.UserMessage(parse_prompt)]
-    result = try
-      call_llm(parse_msgs).content
-    catch e
-      emit(Dict("type" => "error", "text" => "Failed to parse schedule: $(sprint(showerror, e))"))
-      return
+  else
+    gen_prompt *= """
+
+Reply in this exact format (one line):
+NAME: <short name>"""
+  end
+  gen_prompt *= "\n\nPrompt: $prompt"
+
+  gen_msgs = [PromptingTools.SystemMessage("You generate short names for tasks and convert schedules to cron. Reply only in the requested format."),
+              PromptingTools.UserMessage(gen_prompt)]
+  result = try
+    call_llm(gen_msgs).content
+  catch e
+    emit(Dict("type" => "error", "text" => "Failed to generate routine: $(sprint(showerror, e))"))
+    return
+  end
+
+  # Parse response
+  name = prompt[1:min(40, length(prompt))]  # fallback
+  schedule_cron = nothing
+  next_run = nothing
+  for line in split(strip(result), '\n')
+    line = strip(line)
+    if startswith(line, "NAME:")
+      name = strip(line[6:end])
+    elseif startswith(line, "CRON:")
+      schedule_cron = strip(line[6:end])
     end
-    schedule_cron = strip(result)
+  end
+
+  if schedule_cron !== nothing
     try
       next_run = string(Scheduler.next_cron_time_utc(schedule_cron, now(Dates.UTC)))
     catch e
