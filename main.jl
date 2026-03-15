@@ -140,7 +140,9 @@ end
 
 function _detect_schema()
   model = get(CONFIG, "llm", "")
-  if startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
+  if startswith(model, "ollama:")
+    PromptingTools.OllamaSchema()
+  elseif startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
     haskey(CONFIG, "openai_key") && (ENV["OPENAI_API_KEY"] = CONFIG["openai_key"])
     PromptingTools.OpenAISchema()
   elseif startswith(model, "claude-")
@@ -472,7 +474,9 @@ struct LlmResult
 end
 
 function _detect_schema_for(model::String)
-  if startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
+  if startswith(model, "ollama:")
+    PromptingTools.OllamaSchema()
+  elseif startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
     PromptingTools.OpenAISchema()
   elseif startswith(model, "claude-")
     PromptingTools.AnthropicSchema()
@@ -491,8 +495,14 @@ end
 
 function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing)::LlmResult
   temperature = get(CONFIG, "temperature", 0.7)
-  timeout = get(CONFIG, "llm_timeout", 60)
   use_model = model !== nothing ? model : CONFIG["llm"]
+  is_local = startswith(use_model, "ollama:")
+  # Strip provider prefix (e.g. "ollama:qwen3.5:35b" → "qwen3.5:35b")
+  if is_local
+    use_model = use_model[length("ollama:")+1:end]
+  end
+  default_timeout = is_local ? 300 : 60
+  timeout = get(CONFIG, "llm_timeout", default_timeout)
   use_schema = schema !== nothing ? schema : LLM_SCHEMA[]
   # If a custom model is provided without a schema, detect it
   if model !== nothing && schema === nothing
