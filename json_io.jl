@@ -11,6 +11,9 @@ include("scheduler.jl")
 using .Scheduler
 using Dates: DateTime, now
 
+include("gateway/gateway.jl")
+include("gateway/telegram.jl")
+
 const AGENT_LOCK = ReentrantLock()
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
@@ -41,13 +44,24 @@ end
 
 # ── Drain agent events and emit as JSON ──────────────────────────────
 
+function _current_inbox(conversation_id::Union{String,Nothing})
+    cid = conversation_id === nothing ? "default" : conversation_id
+    get_gui_conversation(cid).inbox
+end
+
 function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=nothing)
   while true
     event = take!(outbox)
     if event isa AgentMessage
       emit(Dict("type" => "agent_message", "text" => event.text); conversation_id)
     elseif event isa ToolCallRequest
-      emit(Dict("type" => "tool_call_request", "id" => string(event.id), "name" => event.name, "args" => event.args); conversation_id)
+      if !isempty(ROUTER.active_adapters)
+        # Route through presence router (handles GUI vs Telegram)
+        @async route_approval(ROUTER, event, _current_inbox(conversation_id); conversation_id)
+      else
+        # No gateway configured — direct to GUI as before
+        emit(Dict("type" => "tool_call_request", "id" => string(event.id), "name" => event.name, "args" => event.args); conversation_id)
+      end
     elseif event isa ToolResult
       emit(Dict("type" => "tool_result", "name" => event.name, "result" => event.result); conversation_id)
     elseif event isa AgentDone
@@ -307,6 +321,14 @@ function handle_project_create(msg)
     INSERT INTO projects (id, name, path, model, idle_check_mins, created_at)
     VALUES (?, ?, ?, ?, ?, datetime('now'))
   """, (id, name, path, model, idle_mins))
+
+  # Create Telegram topic for new project if gateway is active
+  adapter = primary_adapter(ROUTER)
+  if adapter !== nothing && adapter isa TelegramAdapter
+    try ensure_project_topic!(adapter, id, name) catch e
+      @warn "Failed to create Telegram topic for new project" exception=e
+    end
+  end
 
   handle_projects_list()
 end
@@ -635,10 +657,13 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
 
   # Emit notification if notable
   if notable == 1
-    emit(Dict("type" => "notification", "text" => clean_result,
-              "project_id" => routine.project_id, "routine_id" => routine.id))
-    count = Scheduler.unseen_notable_count(DB)
-    emit(Dict("type" => "unseen_count", "count" => count))
+    route_notification(ROUTER, clean_result;
+        project_id=routine.project_id,
+        routine_id=routine.id,
+        extra_gui_emit=() -> begin
+            count = Scheduler.unseen_notable_count(DB)
+            emit(Dict("type" => "unseen_count", "count" => count))
+        end)
   end
 end
 
@@ -692,9 +717,12 @@ Review this project and determine if there's anything you can do to help move it
   """, (finished_at, total_tokens, cost, project.id))
 
   if notable == 1
-    emit(Dict("type" => "notification", "text" => clean_result, "project_id" => project.id))
-    count = Scheduler.unseen_notable_count(DB)
-    emit(Dict("type" => "unseen_count", "count" => count))
+    route_notification(ROUTER, clean_result;
+        project_id=project.id,
+        extra_gui_emit=() -> begin
+            count = Scheduler.unseen_notable_count(DB)
+            emit(Dict("type" => "unseen_count", "count" => count))
+        end)
   end
 end
 
@@ -702,6 +730,118 @@ end
 
 # Start scheduler timer (ticks every 60 seconds)
 const SCHEDULER_TIMER = Timer(t -> scheduler_tick!(), 60; interval=60)
+
+# ── Gateway setup ───────────────────────────────────────────────────
+
+const ROUTER = PresenceRouter(;
+    idle_threshold_mins=get(get(CONFIG, "gateway", Dict()), "idle_threshold_mins", 15)
+)
+
+# Wire the router's GUI emit function to our emit()
+ROUTER.gui_io = (d; conversation_id=nothing) -> emit(d; conversation_id)
+
+# Wire GUI activity check — uses last_user_activity_at directly
+# (the GUI is the sidecar's only client, so backend activity == GUI activity)
+ROUTER.check_gui_active = () -> begin
+    idle_secs = Dates.value(now(Dates.UTC) - last_user_activity_at[]) / 1000
+    idle_secs < ROUTER.idle_threshold_mins * 60
+end
+
+# Conversation queuing for Telegram topics (one conversation at a time per topic)
+const TELEGRAM_ACTIVE_CONVERSATIONS = Dict{String, Bool}()
+const TELEGRAM_MESSAGE_QUEUE = Dict{String, Vector{InboundEnvelope}}()
+
+# Set up inbound handler for Telegram messages → agent dispatch
+ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
+    text = env.text
+    topic = env.topic_id
+    conv_id = "tg-$(topic)"
+
+    # Queue if a conversation is already running for this topic
+    if get(TELEGRAM_ACTIVE_CONVERSATIONS, topic, false)
+        queue = get!(TELEGRAM_MESSAGE_QUEUE, topic) do; InboundEnvelope[] end
+        push!(queue, env)
+        adapter = primary_adapter(ROUTER)
+        if adapter !== nothing
+            try send_message(adapter, OutboundEnvelope{channel_symbol(adapter)}(
+                "Message queued — I'll get to it when the current task finishes.", topic))
+            catch end
+        end
+        return
+    end
+
+    TELEGRAM_ACTIVE_CONVERSATIONS[topic] = true
+    conv = get_gui_conversation(conv_id)
+    @async begin
+        lock(AGENT_LOCK)
+        try
+            run_agent(text, conv.outbox, conv.inbox;
+                      session_history=conv.history, auto_allowed=conv.auto_allowed,
+                      conversation_id=conv_id)
+        finally
+            unlock(AGENT_LOCK)
+        end
+    end
+    # Drain agent events and send back to Telegram
+    @async begin
+        adapter = primary_adapter(ROUTER)
+        adapter === nothing && return
+        while true
+            event = take!(conv.outbox)
+            if event isa AgentMessage
+                try
+                    out = OutboundEnvelope{:telegram}(event.text, env.topic_id)
+                    send_message(adapter, out)
+                catch e
+                    @warn "Failed to send agent response to Telegram" exception=e
+                end
+            elseif event isa ToolCallRequest
+                # Route through presence router
+                @async route_approval(ROUTER, event, conv.inbox; conversation_id=conv_id)
+            elseif event isa ToolResult
+                # Tool results not sent to Telegram (too noisy)
+            elseif event isa AgentDone
+                break
+            end
+        end
+        # Process queued messages for this topic
+        TELEGRAM_ACTIVE_CONVERSATIONS[topic] = false
+        queue = get(TELEGRAM_MESSAGE_QUEUE, topic, nothing)
+        if queue !== nothing && !isempty(queue)
+            next_env = popfirst!(queue)
+            ROUTER._inbound_handler(next_env)
+        end
+    end
+end
+
+# Initialize Telegram adapter if configured
+let gw_config = get(CONFIG, "gateway", nothing)
+    if gw_config !== nothing
+        tg_config = get(gw_config, "telegram", nothing)
+        if tg_config !== nothing
+            bot_token = string(get(tg_config, "bot_token", ""))
+            chat_id = get(tg_config, "chat_id", 0)
+            owner_id = get(tg_config, "owner_id", 0)
+            if !isempty(bot_token) && chat_id != 0 && owner_id != 0
+                adapter = TelegramAdapter(; bot_token, chat_id=Int64(chat_id), owner_id=Int64(owner_id), db=DB)
+                register_adapter!(ROUTER, adapter)
+                try
+                    start!(adapter, ROUTER)
+                    @info "Telegram gateway active"
+                catch e
+                    @warn "Failed to start Telegram adapter" exception=e
+                end
+            end
+        end
+    end
+end
+
+# Timer to check pending approval migrations (every 60s)
+const APPROVAL_CHECK_TIMER = Timer(t -> begin
+    try check_pending_approvals!(ROUTER) catch e
+        @warn "Approval check error" exception=e
+    end
+end, 60; interval=60)
 
 # Emit initial unseen count
 emit(Dict("type" => "unseen_count", "count" => Scheduler.unseen_notable_count(DB)))
@@ -752,8 +892,14 @@ while !eof(stdin)
       else
         :deny
       end
-      conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id)
-      put!(conv.inbox, ToolApproval(id, decision))
+      if !isempty(ROUTER.active_adapters)
+        # Route through router (checks ownership, handles retraction race)
+        resolve_approval(ROUTER, id, decision, :gui)
+      else
+        # No gateway — direct as before
+        conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id)
+        put!(conv.inbox, ToolApproval(id, decision))
+      end
     elseif msg_type == "config_get"
       handle_config_get()
     elseif msg_type == "config_set"
