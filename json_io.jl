@@ -268,7 +268,8 @@ function handle_projects_list()
   """) |> SQLite.rowtable
   data = [Dict(
     "id" => r.id, "name" => r.name, "path" => r.path,
-    "is_default" => r.is_default == 1, "model" => something(r.model, nothing),
+    "is_default" => r.is_default == 1, "paused" => something(r.paused, 0) == 1,
+    "model" => something(r.model, nothing),
     "idle_check_mins" => r.idle_check_mins, "tokens_used" => r.tokens_used,
     "cost_usd" => r.cost_usd, "last_checked_at" => something(r.last_checked_at, nothing),
     "created_at" => r.created_at, "routine_count" => r.routine_count
@@ -307,11 +308,18 @@ function handle_project_update(msg)
 
   sets = String[]
   vals = Any[]
-  for (key, col) in [(:name, "name"), (:model, "model"), (:idle_check_mins, "idle_check_mins")]
+  for (key, col) in [(:name, "name"), (:model, "model"), (:idle_check_mins, "idle_check_mins"), (:paused, "paused")]
     v = get(msg, key, nothing)
     if v !== nothing
       push!(sets, "$col=?")
-      push!(vals, key == :model && v == "" ? nothing : v)
+      val = if key == :model && v == ""
+        nothing
+      elseif key == :paused
+        v == true || v == 1 ? 1 : 0
+      else
+        v
+      end
+      push!(vals, val)
     end
   end
   isempty(sets) && return
@@ -535,7 +543,7 @@ function _scheduler_tick!()
   due = SQLite.DBInterface.execute(DB, """
     SELECT r.*, p.path as project_path, p.model as project_model
     FROM routines r JOIN projects p ON r.project_id = p.id
-    WHERE r.enabled=1 AND r.next_run_at IS NOT NULL AND r.next_run_at <= ?
+    WHERE r.enabled=1 AND p.paused=0 AND r.next_run_at IS NOT NULL AND r.next_run_at <= ?
   """, (string(now_utc),)) |> SQLite.rowtable
 
   for routine in due
@@ -544,7 +552,7 @@ function _scheduler_tick!()
 
   # 2. Idle project check-ins
   idle_secs = Dates.value(now_utc - last_user_activity_at[]) / 1000
-  projects = SQLite.DBInterface.execute(DB, "SELECT * FROM projects") |> SQLite.rowtable
+  projects = SQLite.DBInterface.execute(DB, "SELECT * FROM projects WHERE paused=0") |> SQLite.rowtable
 
   for proj in projects
     idle_mins = something(proj.idle_check_mins, 30)

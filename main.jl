@@ -60,6 +60,7 @@ SQLite.execute(DB, """
     name TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE,
     is_default INTEGER DEFAULT 0,
+    paused INTEGER DEFAULT 0,
     model TEXT,
     idle_check_mins INTEGER DEFAULT 30,
     tokens_used INTEGER DEFAULT 0,
@@ -69,6 +70,9 @@ SQLite.execute(DB, """
     metadata TEXT DEFAULT '{}'
   );
 """)
+
+# Migration: add paused column to existing projects tables
+try SQLite.execute(DB, "ALTER TABLE projects ADD COLUMN paused INTEGER DEFAULT 0") catch end
 
 SQLite.execute(DB, """
   CREATE TABLE IF NOT EXISTS routines (
