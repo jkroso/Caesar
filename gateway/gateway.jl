@@ -176,12 +176,13 @@ was already retracted from this target (stale response).
 function resolve_approval(router::PresenceRouter, id::UInt64, decision::Symbol, from_target::Symbol)::Bool
     pa = get(router.pending_approvals, id, nothing)
     pa === nothing && return false
-    lock(pa.lock) do
+    return lock(pa.lock) do
         if pa.current_target != from_target
-            return false  # stale — approval was retracted from this target
+            false  # stale — approval was retracted from this target
+        else
+            put!(pa.response, ToolApproval(id, decision))
+            true
         end
-        put!(pa.response, ToolApproval(id, decision))
-        return true
     end
 end
 
