@@ -25,3 +25,8 @@ struct ToolApproval
   id::UInt64
   decision::Symbol  # :allow, :deny, :always
 end
+
+struct ToolApprovalRetracted
+  id::UInt64
+  reason::String  # e.g. "routed_to_telegram", "routed_to_gui"
+end
