@@ -1,28 +1,10 @@
-# scheduler.jl — Cron parser, pricing, and scheduler tick logic
+# scheduler.jl — Cron parser and scheduler tick logic
 module Scheduler
 
 using Dates, SQLite, UUIDs, JSON3
 
-# ── Pricing ──────────────────────────────────────────────────────────
-
-# (input_price, output_price) in USD per 1M tokens
-const MODEL_PRICING = Dict{String, Tuple{Float64, Float64}}(
-  "grok-code-fast-1"              => (0.15, 0.60),
-  "grok-4-1-fast-reasoning"       => (0.50, 2.00),
-  "grok-4-1-fast-non-reasoning"   => (0.15, 0.60),
-  "claude-sonnet-4-6"             => (3.00, 15.00),
-  "claude-opus-4-6"               => (15.00, 75.00),
-  "claude-haiku-4-5-20251001"     => (0.80, 4.00),
-  "gemini-2.5-pro"                => (1.25, 10.00),
-  "gemini-2.5-flash"              => (0.15, 0.60),
-)
-
-function compute_cost(model::String, input_tokens::Int, output_tokens::Int)::Float64
-  prices = get(MODEL_PRICING, model, nothing)
-  prices === nothing && return 0.0
-  (input_price, output_price) = prices
-  (input_tokens * input_price + output_tokens * output_price) / 1_000_000
-end
+include("models.jl")
+using .Models: compute_cost
 
 # ── Cron Parser ──────────────────────────────────────────────────────
 

@@ -209,6 +209,15 @@ function handle_models_list()
     @warn "Could not reach Ollama" exception=e
   end
 
+  # Enrich with pricing from models.dev api.json
+  for m in models
+    prices = get(Scheduler.Models.PRICING, m["id"], nothing)
+    if prices !== nothing
+      m["cost_input"] = prices[1]
+      m["cost_output"] = prices[2]
+    end
+  end
+
   _models_cache[] = models
   _models_cache_time[] = now
   emit(Dict("type" => "models", "data" => models))
