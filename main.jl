@@ -111,6 +111,18 @@ SQLite.execute(DB, """
   );
 """)
 
+SQLite.execute(DB, """
+  CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT 'prosca',
+    title TEXT NOT NULL DEFAULT 'New chat',
+    handed_off_to TEXT,
+    handed_off_from TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+""")
+
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(project_id);")
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id);")
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routine_runs(notable, seen);")
@@ -384,11 +396,12 @@ end
 load_mcp_servers!()
 
 # ============= AGENT =============
-function build_system_prompt(;active_skill::Union{Skill, Nothing}=nothing)::String
-  skill_list = if isempty(SKILLS)
+function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=nothing)::String
+  all_skills = merged_skills(agent)
+  skill_list = if isempty(all_skills)
     ""
   else
-    catalog = join(["- /$(s.name): $(s.description)" for s in values(SKILLS)], "\n")
+    catalog = join(["- /$(s.name): $(s.description)" for s in values(all_skills)], "\n")
     """
     Available skills (use {"skill": "name"} to activate, or user types /name):
     $catalog
@@ -399,6 +412,22 @@ function build_system_prompt(;active_skill::Union{Skill, Nothing}=nothing)::Stri
     "\n\n# Active Skill: $(active_skill.name)\n$(active_skill.content)\n"
   else
     ""
+  end
+
+  # Available agents for handoff
+  other_agents = [a for a in values(AGENTS) if a.id != agent.id]
+  handoff_section = if isempty(other_agents)
+    ""
+  else
+    agent_lines = join(["- $(a.id): $(split(a.personality, '\n')[1])" for a in other_agents], "\n")
+    """
+
+    ## Handoff
+    You can delegate to another agent if the task is better suited for them:
+    $agent_lines
+
+    To hand off: {"handoff": {"to_agent": "agent_id", "reason": "why", "context": "summary"}}
+    """
   end
 
   # Build MCP tool sections
@@ -455,10 +484,10 @@ function build_system_prompt(;active_skill::Union{Skill, Nothing}=nothing)::Stri
   other_mcp_section = isempty(other_mcp_tools) ? "" : "\n## External Tools (MCP)\n$(join(other_mcp_tools, "\n"))\n"
 
   """
-  $PERSONALITY
+  $(agent.personality)
 
   Current instructions:
-  $INSTRUCTIONS
+  $(agent.instructions)
 
   You have persistent memory across sessions.
 
@@ -468,7 +497,7 @@ function build_system_prompt(;active_skill::Union{Skill, Nothing}=nothing)::Stri
   $(join(TOOL_SCHEMAS, "\n"))
   $other_mcp_section$skill_list
   Or {"final_answer": "your response here"}
-  $skill_injection
+  $skill_injection$handoff_section
   """
 end
 
@@ -530,11 +559,11 @@ function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing
   LlmResult(resp.content, input_tokens, output_tokens)
 end
 
-function run_agent(user_input::String, outbox::Channel, inbox::Channel;
+function run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent;
                    session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
                    conversation_id::Union{String,Nothing}=nothing)
   try
-    _run_agent(user_input, outbox, inbox; session_history, auto_allowed, conversation_id)
+    _run_agent(user_input, outbox, inbox, agent; session_history, auto_allowed, conversation_id)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -542,25 +571,26 @@ function run_agent(user_input::String, outbox::Channel, inbox::Channel;
   end
 end
 
-function _run_agent(user_input::String, outbox::Channel, inbox::Channel;
+function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent;
                     session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
                     conversation_id::Union{String,Nothing}=nothing)
-  log_memory("User: $user_input"; role="User", conversation_id)
+  log_memory("User: $user_input"; role="User", agent_id=agent.id, conversation_id)
 
   # Check for /skill-name prefix
   active_skill = nothing
   if startswith(user_input, "/")
     parts = split(user_input, limit=2)
     skill_name = parts[1][2:end]  # strip leading /
-    if haskey(SKILLS, skill_name)
-      active_skill = SKILLS[skill_name]
+    all_skills_init = merged_skills(agent)
+    if haskey(all_skills_init, skill_name)
+      active_skill = all_skills_init[skill_name]
       user_input = length(parts) > 1 ? strip(parts[2]) : skill_name
       @info "Activated skill: $(skill_name)"
     end
   end
 
-  memories = search_memories(user_input; conversation_id)  # now powered by RAGTools
-  messages = PromptingTools.AbstractMessage[PromptingTools.SystemMessage(build_system_prompt(;active_skill))]
+  memories = search_memories(user_input; agent_id=agent.id, conversation_id)  # now powered by RAGTools
+  messages = PromptingTools.AbstractMessage[PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))]
 
   window = session_history[max(1, end-19):end]  # last 10 exchange pairs
   append!(messages, window)
@@ -619,31 +649,67 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel;
       end
       # LLM responded with plain text — treat as final answer
       put!(outbox, AgentMessage(response_text))
-      log_memory("Agent: $response_text"; conversation_id)
+      log_memory("Agent: $response_text"; agent_id=agent.id, conversation_id)
       break
     end
 
     if haskey(parsed, :final_answer)
       put!(outbox, AgentMessage(parsed.final_answer))
-      log_memory("Agent: $(parsed.final_answer)"; conversation_id)
+      log_memory("Agent: $(parsed.final_answer)"; agent_id=agent.id, conversation_id)
       break
     end
 
     if haskey(parsed, :skill)
       sn = string(parsed.skill)
-      if haskey(SKILLS, sn)
-        active_skill = SKILLS[sn]
+      all_skills = merged_skills(agent)
+      if haskey(all_skills, sn)
+        active_skill = all_skills[sn]
         @info "LLM activated skill: $sn"
         # Rebuild system prompt with the skill and retry
-        messages[1] = PromptingTools.SystemMessage(build_system_prompt(;active_skill))
+        messages[1] = PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))
         push!(messages, PromptingTools.AIMessage(response_text))
         push!(messages, PromptingTools.UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
         continue
       else
         push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Unknown skill '$sn'. Available: $(join(keys(SKILLS), ", "))"))
+        push!(messages, PromptingTools.UserMessage("Unknown skill '$sn'. Available: $(join(keys(all_skills), ", "))"))
         continue
       end
+    end
+
+    if haskey(parsed, :handoff)
+      to_agent_id = string(get(parsed.handoff, :to_agent, ""))
+      reason = string(get(parsed.handoff, :reason, ""))
+      context_summary = string(get(parsed.handoff, :context, ""))
+
+      if !haskey(AGENTS, to_agent_id)
+        push!(messages, PromptingTools.AIMessage(response_text))
+        available = join([a.id for a in values(AGENTS) if a.id != agent.id], ", ")
+        push!(messages, PromptingTools.UserMessage("Unknown agent '$to_agent_id'. Available agents: $available"))
+        continue
+      end
+
+      # Create handoff conversation in SQLite
+      new_conv_id = string(UUIDs.uuid4())
+      try
+        SQLite.execute(DB, """
+          INSERT INTO conversations (id, agent_id, title, handed_off_from, created_at, updated_at)
+          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+        """, (new_conv_id, to_agent_id, "Handoff: $reason", conversation_id))
+
+        # Update current conversation
+        if conversation_id !== nothing
+          SQLite.execute(DB, "UPDATE conversations SET handed_off_to=?, updated_at=datetime('now') WHERE id=?",
+                         (new_conv_id, conversation_id))
+        end
+      catch e
+        @warn "Failed to record handoff in DB: $e"
+      end
+
+      # Emit handoff message
+      put!(outbox, AgentMessage("Handing off to **$to_agent_id**: $reason"))
+      log_memory("Handoff to $to_agent_id: $reason\nContext: $context_summary"; agent_id=agent.id, conversation_id)
+      break  # exits the ReAct loop, then AgentDone is emitted after the loop
     end
 
     tool_name = get(parsed, :tool, nothing)
@@ -720,7 +786,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel;
     end
     @info "Tool result: $(result[1:min(200, end)])"
     put!(outbox, ToolResult(tn, result))
-    log_memory("Tool: $tn($args_str) → $(result[1:min(500, end)])"; conversation_id)
+    log_memory("Tool: $tn($args_str) → $(result[1:min(500, end)])"; agent_id=agent.id, conversation_id)
 
     push!(messages, PromptingTools.AIMessage(response_text))
     push!(messages, PromptingTools.UserMessage("Tool result: $result"))
