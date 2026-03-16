@@ -53,6 +53,9 @@ SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timesta
 # Migrate: add conversation_id column if missing (safe on new DBs too)
 try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
 SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id);")
+# Migrate: add agent_id column if missing
+try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN agent_id TEXT DEFAULT 'prosca'") catch end
+SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_agent_id ON memories(agent_id);")
 
 SQLite.execute(DB, """
   CREATE TABLE IF NOT EXISTS projects (
@@ -181,49 +184,49 @@ function get_embedding(text::String)::Union{Vector{Float64}, Nothing}
 end
 
 # ============= EMBEDDINGS + RAGTOOLS MEMORY =============
-const MEMORY_INDEXES = Dict{Union{String,Nothing}, ChunkIndex}()
+const MEMORY_INDEXES = Dict{Tuple{String, Union{String,Nothing}}, ChunkIndex}()
 
-function rebuild_memory_index(; conversation_id::Union{String,Nothing}=nothing)
-  # Load memory contents filtered by conversation
+function rebuild_memory_index(; agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
   query, params = if conversation_id !== nothing
-    "SELECT id, content FROM memories WHERE conversation_id = ? ORDER BY timestamp DESC", (conversation_id,)
+    "SELECT id, content FROM memories WHERE agent_id = ? AND conversation_id = ? ORDER BY timestamp DESC", (agent_id, conversation_id)
   else
-    "SELECT id, content FROM memories WHERE conversation_id IS NULL ORDER BY timestamp DESC", ()
+    "SELECT id, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL ORDER BY timestamp DESC", (agent_id,)
   end
   rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
     (id=row.id, content=row.content)
   end
 
+  key = (agent_id, conversation_id)
   if isempty(rows)
-    @info "No memories yet for conversation=$(something(conversation_id, "global"))"
-    MEMORY_INDEXES[conversation_id] = build_index(["(empty memory)"]; chunker_kwargs=(; sources=["mem-0"]))
+    @info "No memories yet for agent=$agent_id conversation=$(something(conversation_id, "global"))"
+    MEMORY_INDEXES[key] = build_index(["(empty memory)"]; chunker_kwargs=(; sources=["mem-0"]))
     return
   end
 
   docs = [r.content for r in rows]
   sources = ["mem-$(r.id)" for r in rows]
-
-  MEMORY_INDEXES[conversation_id] = build_index(docs; chunker_kwargs=(; sources))
-  @info "RAG index rebuilt with $(length(docs)) memories for conversation=$(something(conversation_id, "global"))"
+  MEMORY_INDEXES[key] = build_index(docs; chunker_kwargs=(; sources))
+  @info "RAG index rebuilt with $(length(docs)) memories for agent=$agent_id conversation=$(something(conversation_id, "global"))"
 end
 
-function log_memory(text::String; role::String="Agent", metadata=Dict(), conversation_id::Union{String,Nothing}=nothing)
-  emb = get_embedding(text)  # keep for future hybrid use
+function log_memory(text::String; role::String="Agent", metadata=Dict(),
+                    agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
+  emb = get_embedding(text)
   stmt = SQLite.Stmt(DB, """
-    INSERT INTO memories (timestamp, role, content, embedding, metadata, conversation_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO memories (timestamp, role, content, embedding, metadata, agent_id, conversation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   """)
-  SQLite.execute(stmt, (Dates.now(Dates.UTC), role, text, emb === nothing ? "" : JSON3.write(emb), JSON3.write(metadata), conversation_id))
-
-  rebuild_memory_index(; conversation_id)  # real-time update
+  SQLite.execute(stmt, (Dates.now(Dates.UTC), role, text, emb === nothing ? "" : JSON3.write(emb), JSON3.write(metadata), agent_id, conversation_id))
+  rebuild_memory_index(; agent_id, conversation_id)
 end
 
-function search_memories(query::String; limit::Int=5, conversation_id::Union{String,Nothing}=nothing)::String
-  index = get(MEMORY_INDEXES, conversation_id, nothing)
+function search_memories(query::String; limit::Int=5,
+                         agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)::String
+  key = (agent_id, conversation_id)
+  index = get(MEMORY_INDEXES, key, nothing)
   if index === nothing || isempty(index.chunks)
     return "(no memories yet)"
   end
-
   try
     result = retrieve(index, query; top_k=limit)
     ctx = result.context
@@ -235,12 +238,13 @@ function search_memories(query::String; limit::Int=5, conversation_id::Union{Str
   end
 end
 
-function prune_memories(;older_than_days::Int=30, batch_size::Int=50, conversation_id::Union{String,Nothing}=nothing)
+function prune_memories(;older_than_days::Int=30, batch_size::Int=50,
+                        agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
   cutoff = Dates.now(Dates.UTC) - Dates.Day(older_than_days)
   query, params = if conversation_id !== nothing
-    "SELECT id, role, content FROM memories WHERE conversation_id = ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (conversation_id, string(cutoff), batch_size)
+    "SELECT id, role, content FROM memories WHERE agent_id = ? AND conversation_id = ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (agent_id, conversation_id, string(cutoff), batch_size)
   else
-    "SELECT id, role, content FROM memories WHERE conversation_id IS NULL AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (string(cutoff), batch_size)
+    "SELECT id, role, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (agent_id, string(cutoff), batch_size)
   end
   rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
     (id=row.id, role=row.role, content=row.content)
@@ -257,14 +261,12 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50, conversati
   ids = join([string(r.id) for r in rows], ",")
   SQLite.execute(DB, "DELETE FROM memories WHERE id IN ($ids)")
 
-  rebuild_memory_index(; conversation_id)
-  log_memory("Memory consolidation: $summary"; role="System", conversation_id)
+  rebuild_memory_index(; agent_id, conversation_id)
+  log_memory("Memory consolidation: $summary"; role="System", agent_id, conversation_id)
 
   "Pruned $(length(rows)) old memories into one summary."
 end
 
-# Build index on startup (global memories only — per-conversation indexes built on demand)
-rebuild_memory_index()
 
 # ============= TOOLS =============
 
@@ -366,6 +368,11 @@ include("agents.jl")
 # ============= AGENTS =============
 migrate_to_agents!()
 load_agents!()
+
+# Build indexes for all agents on startup (global memories only)
+for agent_id in keys(AGENTS)
+    rebuild_memory_index(; agent_id)
+end
 
 # ============= MCP SERVERS =============
 const MCP_CONFIG_PATH = string(HOME * "mcp_servers.json")
