@@ -126,31 +126,44 @@ Note: `path_verdict` uses `dir_str * "/"` to prevent path traversal (e.g. `/User
 
 ### Interpreter Integration
 
-The `interpret` function uses JuliaInterpreter to step through code with breakpoints on dangerous functions. When a breakpoint fires, the resolved arguments are extracted from the frame and passed to `validate`.
+The `interpret` function uses JuliaInterpreter's `step_expr!` to manually step through every expression. Before each call expression executes, the function and resolved arguments are inspected and passed to `validate`.
 
-**Multi-expression support:** Use `Meta.parseall(code)` (not `Meta.parse`) to handle multi-line input. Iterate over the resulting expression block.
+**Multi-expression support:** Use `Meta.parseall(code)` (not `Meta.parse`) to handle multi-line input.
 
-**Breakpoint mechanism:** Set `JuliaInterpreter.breakpoint` on each function in the safety registry. When a breakpoint triggers, the interpreter pauses with the frame positioned at function entry — at this point all arguments have been evaluated and are available as local variables in the frame.
+**Manual stepping:** Call `step_expr!` in a loop. On each step, inspect the current frame — if it's about to enter a function call, extract the function and resolved arguments, then check `validate(f, args...)`. This catches every call including indirect ones (user-defined wrappers around dangerous functions).
 
 ```julia
 function interpret(agent::Agent, code::String; outbox=nothing, inbox=nothing)::String
   expr = Meta.parseall(code)
-  # Evaluate in agent's module via Core.eval under the interpreter
-  # with breakpoints on all validated functions.
-  #
-  # On breakpoint hit:
-  #   1. Extract f and resolved args from the frame
-  #   2. verdict = validate(f, args...)
-  #   3. Allow → continue stepping
-  #   4. Deny → throw SafetyDeniedError
-  #   5. Ask → put ToolCallRequest on outbox, take ToolApproval from inbox
-  #            :allow/:always → continue, :deny → throw
-  #
-  # Return string representation of the final result.
+  frame = JuliaInterpreter.prepare_thunk(agent.repl_module, expr)
+  while true
+    # Step one expression
+    ret = JuliaInterpreter.step_expr!(frame)
+    # If we're about to call a function, inspect it
+    if is_call(frame)
+      f, args... = extract_call_args(frame)
+      verdict = validate(f, args...)
+      if verdict == Deny
+        throw(SafetyDeniedError(string(f), string(args), "blocked by safety rules"))
+      elseif verdict == Ask
+        # Use existing approval flow
+        req_id = rand(UInt64)
+        put!(outbox, ToolCallRequest(string(f), string(args), req_id))
+        approval = take!(inbox)
+        if approval.decision == :deny
+          throw(SafetyDeniedError(string(f), string(args), "denied by user"))
+        end
+        # :allow or :always → continue
+      end
+      # Allow → proceed
+    end
+    # Check if execution is complete
+    ret !== nothing && return sprint(show, ret)
+  end
 end
 ```
 
-The exact frame manipulation API (extracting locals, resuming/aborting) is an implementation detail that depends on JuliaInterpreter's internals.
+Note: `is_call` and `extract_call_args` are helpers that inspect the current frame state. The exact API for extracting call targets and arguments from `JuliaInterpreter.Frame` is an implementation detail — the frame's `stmt` field contains the current expression, and locals can be read with `JuliaInterpreter.locals(frame)`.
 
 ## ReAct Loop Integration
 
