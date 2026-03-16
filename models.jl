@@ -1,7 +1,6 @@
 # models.jl — Model info and pricing loaded from models.dev api.json
-module Models
 
-using JSON3
+@use JSON3
 
 const API_JSON_PATH = joinpath(@__DIR__, "gui", "public", "api.json")
 
@@ -36,4 +35,3 @@ function compute_cost(model::String, input_tokens::Int, output_tokens::Int)::Flo
   (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 end
 
-end # module

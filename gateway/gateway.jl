@@ -1,6 +1,6 @@
 # gateway/gateway.jl — Channel gateway: envelope types, adapter interface, presence router
 
-using Dates
+@use Dates
 
 # ── Envelope types (type-parameterized by channel symbol) ───────────
 

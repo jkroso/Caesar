@@ -1,7 +1,8 @@
 # gateway/telegram_api.jl — Low-level Telegram Bot API wrapper
 
-using HTTP, JSON3
-using Logging
+@use HTTP
+@use JSON3
+@use Logging
 
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 

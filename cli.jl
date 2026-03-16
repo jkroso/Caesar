@@ -1,4 +1,4 @@
-include("main.jl")
+@use "./main"...
 
 println("🧠 Prosca started")
 println("Brain: $HOME")

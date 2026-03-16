@@ -11,9 +11,9 @@
 @use Logging
 @use UUIDs
 
-include("events.jl")
-include("mcp_client.jl")
-include("validate_ex.jl")
+@use "./events"...
+@use "./mcp_client"...
+@use "./validate_ex" validate_ex
 
 const HOME = mkpath(home() * "Prosca")
 
@@ -375,7 +375,7 @@ end
 
 load_skills!()
 
-include("agents.jl")
+@use "./agents"...
 
 # ============= AGENTS =============
 migrate_to_agents!()

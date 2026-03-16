@@ -1,10 +1,10 @@
 # scheduler.jl — Cron parser and scheduler tick logic
-module Scheduler
 
-using Dates, SQLite, UUIDs, JSON3
-
-include("models.jl")
-using .Models: compute_cost
+@use Dates
+@use SQLite
+@use UUIDs
+@use JSON3
+@use "./models" compute_cost PRICING
 
 # ── Cron Parser ──────────────────────────────────────────────────────
 
@@ -105,4 +105,3 @@ function unseen_notable_count(db::SQLite.DB)::Int
   rows[1].c
 end
 
-end # module

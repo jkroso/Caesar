@@ -1,6 +1,7 @@
 # agents.jl — Multi-agent system: struct, loading, creation, migration
 
 @use "github.com/jkroso/URI.jl/FSPath" FSPath
+@use "./main" Skill parse_skill SKILLS HOME call_llm PromptingTools
 
 struct Agent
     id::String

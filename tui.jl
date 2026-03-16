@@ -2,7 +2,7 @@
 # Prosca TUI — Tachikoma-based terminal interface for the Prosca agent
 # ═══════════════════════════════════════════════════════════════════════
 
-include("main.jl")
+@use "./main"...
 
 @use Tachikoma...
 @use Tachikoma: view, update!, should_quit

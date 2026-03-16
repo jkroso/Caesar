@@ -6,13 +6,12 @@
 # can filter them from Julia noise.
 # ═══════════════════════════════════════════════════════════════════════
 
-include("main.jl")
-include("scheduler.jl")
-using .Scheduler
-using Dates: DateTime, now
+@use "./main"...
+@use "./scheduler"...
+@use Dates DateTime now
 
-include("gateway/gateway.jl")
-include("gateway/telegram.jl")
+@use "./gateway/gateway"...
+@use "./gateway/telegram"...
 
 const AGENT_LOCK = ReentrantLock()
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
@@ -226,7 +225,7 @@ function handle_models_list()
 
   # Enrich with pricing from models.dev api.json
   for m in models
-    prices = get(Scheduler.Models.PRICING, m["id"], nothing)
+    prices = get(PRICING, m["id"], nothing)
     if prices !== nothing
       m["cost_input"] = prices[1]
       m["cost_output"] = prices[2]
@@ -462,7 +461,7 @@ NAME: <short name>"""
 
   if schedule_cron !== nothing
     try
-      next_run = string(Scheduler.next_cron_time_utc(schedule_cron, now(Dates.UTC)))
+      next_run = string(next_cron_time_utc(schedule_cron, now(Dates.UTC)))
     catch e
       emit(Dict("type" => "error", "text" => "Invalid cron expression '$schedule_cron': $(sprint(showerror, e))"))
       return
@@ -503,7 +502,7 @@ function handle_routine_update(msg)
       cron_str = strip(call_llm(parse_msgs).content)
       push!(sets, "schedule_cron=?")
       push!(vals, cron_str)
-      next_run = string(Scheduler.next_cron_time_utc(cron_str, now(Dates.UTC)))
+      next_run = string(next_cron_time_utc(cron_str, now(Dates.UTC)))
       push!(sets, "next_run_at=?")
       push!(vals, next_run)
     end
@@ -550,7 +549,7 @@ function handle_routine_runs_mark_seen(msg)
   for id in ids
     SQLite.execute(DB, "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
   end
-  count = Scheduler.unseen_notable_count(DB)
+  count = unseen_notable_count(DB)
   emit(Dict("type" => "unseen_count", "count" => count))
 end
 
@@ -683,7 +682,7 @@ function _scheduler_tick!()
 end
 
 function _run_routine(routine, now_utc::DateTime)
-  model = Scheduler.resolve_model(DB, routine.model, string(routine.project_id), CONFIG["llm"])
+  model = resolve_model(DB, routine.model, string(routine.project_id), CONFIG["llm"])
   project_md_path = joinpath(string(routine.project_path), "Project.md")
   context = isfile(project_md_path) ? read(project_md_path, String) : ""
 
@@ -711,7 +710,7 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
   notable = occursin("NOTABLE:true", content) ? 1 : 0
   clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
 
-  cost = Scheduler.compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
+  cost = compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
   total_tokens = result_obj.input_tokens + result_obj.output_tokens
   finished_at = string(now(Dates.UTC))
 
@@ -729,7 +728,7 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
 
   # Compute next run
   if routine.schedule_cron !== missing && routine.schedule_cron !== nothing
-    next_at = Scheduler.next_cron_time_utc(string(routine.schedule_cron), now_utc)
+    next_at = next_cron_time_utc(string(routine.schedule_cron), now_utc)
     SQLite.execute(DB, "UPDATE routines SET next_run_at=? WHERE id=?",
                    (string(next_at), routine.id))
   end
@@ -746,7 +745,7 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
         project_id=routine.project_id,
         routine_id=routine.id,
         extra_gui_emit=() -> begin
-            count = Scheduler.unseen_notable_count(DB)
+            count = unseen_notable_count(DB)
             emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
@@ -785,7 +784,7 @@ Review this project and determine if there's anything you can do to help move it
   content = result_obj.content
   notable = occursin("NOTABLE:true", content) ? 1 : 0
   clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
-  cost = Scheduler.compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
+  cost = compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
   total_tokens = result_obj.input_tokens + result_obj.output_tokens
   finished_at = string(now(Dates.UTC))
 
@@ -805,7 +804,7 @@ Review this project and determine if there's anything you can do to help move it
     route_notification(ROUTER, clean_result;
         project_id=project.id,
         extra_gui_emit=() -> begin
-            count = Scheduler.unseen_notable_count(DB)
+            count = unseen_notable_count(DB)
             emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
@@ -930,7 +929,7 @@ const APPROVAL_CHECK_TIMER = Timer(t -> begin
 end, 60; interval=60)
 
 # Emit initial unseen count
-emit(Dict("type" => "unseen_count", "count" => Scheduler.unseen_notable_count(DB)))
+emit(Dict("type" => "unseen_count", "count" => unseen_notable_count(DB)))
 
 # Signal ready
 emit(Dict("type" => "ready"))

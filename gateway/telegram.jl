@@ -1,10 +1,9 @@
 # gateway/telegram.jl — Telegram channel adapter
 
-include("telegram_api.jl")
-
-using SQLite
-using Dates
-using Logging
+@use "./telegram_api"...
+@use SQLite
+@use Dates
+@use Logging
 
 mutable struct TelegramAdapter <: ChannelAdapter
     bot_token::String
