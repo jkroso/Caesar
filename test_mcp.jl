@@ -1,4 +1,4 @@
-include("main.jl")
+@use "./main"...
 
 rt = runtime_server()
 println("Connected: ", rt !== nothing && rt.connected)
