@@ -12,7 +12,7 @@
 @use YAML
 @use UUIDs
 
-include("./mcp_client")
+@use "./mcp_client" MCPTool MCPServer MCP_SERVERS send_jsonrpc mcp_connect! mcp_call_tool mcp_disconnect! load_mcp_servers! runtime_server
 
 const HOME = mkpath(home() * "Prosca")
 
@@ -550,7 +550,7 @@ if !isfile(MCP_CONFIG_PATH)
     "kaimon" => Dict("url" => "http://localhost:2828", "runtime" => true)
   )))
 end
-load_mcp_servers!()
+load_mcp_servers!(HOME)
 
 # ============= AGENT =============
 function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=nothing)::String

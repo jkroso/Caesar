@@ -1,5 +1,9 @@
 # mcp_client.jl — Generic MCP client (JSON-RPC 2.0 over HTTP)
 
+@use HTTP
+@use JSON3
+@use Logging
+
 struct MCPTool
   name::String
   description::String
@@ -117,9 +121,9 @@ function mcp_disconnect!(server::MCPServer)
   @info "Disconnected from MCP server: $(server.name)"
 end
 
-function load_mcp_servers!()
+function load_mcp_servers!(home_dir)
   empty!(MCP_SERVERS)
-  config_path = string(HOME * "mcp_servers.json")
+  config_path = string(home_dir * "mcp_servers.json")
   !isfile(config_path) && return
   servers = try
     JSON3.read(read(config_path, String), Dict{String, Any})
