@@ -361,6 +361,12 @@ end
 
 load_skills!()
 
+include("agents.jl")
+
+# ============= AGENTS =============
+migrate_to_agents!()
+load_agents!()
+
 # ============= MCP SERVERS =============
 const MCP_CONFIG_PATH = string(HOME * "mcp_servers.json")
 if !isfile(MCP_CONFIG_PATH)
