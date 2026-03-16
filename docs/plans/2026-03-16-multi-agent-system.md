@@ -113,8 +113,8 @@ function migrate_to_agents!()
 
     prosca_dir = mkpath(AGENTS_DIR * "prosca")
 
-    cp(string(root_soul), string(prosca_dir * "soul.md"))
-    cp(string(root_instr), string(prosca_dir * "instructions.md"))
+    cp(root_soul, prosca_dir * "soul.md")
+    cp(root_instr, prosca_dir * "instructions.md")
 
     # Copy skills if they exist
     root_skills = HOME * "skills"
@@ -122,7 +122,7 @@ function migrate_to_agents!()
         prosca_skills = mkpath(prosca_dir * "skills")
         for file in root_skills.children
             file.extension == "md" || continue
-            cp(string(file), string(prosca_skills * file.name))
+            cp(file, prosca_skills * file.name)
         end
     end
 
@@ -175,7 +175,7 @@ function delete_agent!(id::String)::Bool
     haskey(AGENTS, id) || return false
     agent = AGENTS[id]
     delete!(AGENTS, id)
-    rm(string(agent.path); recursive=true, force=true)
+    rm(agent.path; recursive=true, force=true)
     true
 end
 
