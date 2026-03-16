@@ -22,13 +22,14 @@ mutable struct GUIConversation
   auto_allowed::Set{String}
   outbox::Channel
   inbox::Channel
+  agent_id::String
 end
 
 const GUI_CONVERSATIONS = Dict{String, GUIConversation}()
 
-function get_gui_conversation(id::String)
+function get_gui_conversation(id::String, agent_id::String="prosca")
   get!(GUI_CONVERSATIONS, id) do
-    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), Channel(32), Channel(32))
+    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), Channel(32), Channel(32), agent_id)
   end
 end
 
@@ -553,6 +554,90 @@ function handle_routine_runs_mark_seen(msg)
   emit(Dict("type" => "unseen_count", "count" => count))
 end
 
+# ── Agent CRUD ───────────────────────────────────────────────────────
+
+function handle_agents_list()
+  data = [Dict("id" => a.id) for a in values(AGENTS)]
+  sort!(data; by=d -> d["id"] == "prosca" ? "" : d["id"])
+  emit(Dict("type" => "agents", "data" => data))
+end
+
+function handle_agent_create(msg)
+  name = string(get(msg, :name, ""))
+  description = string(get(msg, :description, ""))
+  isempty(name) && (emit(Dict("type" => "error", "text" => "Agent name required")); return)
+  if !all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name)
+    emit(Dict("type" => "error", "text" => "Agent name must be alphanumeric (hyphens/underscores allowed)")); return
+  end
+  haskey(AGENTS, name) && (emit(Dict("type" => "error", "text" => "Agent '$name' already exists")); return)
+  agent = create_agent!(name, description)
+  if agent === nothing
+    emit(Dict("type" => "error", "text" => "Failed to create agent '$name'"))
+    return
+  end
+  handle_agents_list()
+end
+
+function handle_agent_update(msg)
+  id = string(get(msg, :id, ""))
+  isempty(id) && return
+  soul = let v = get(msg, :soul, nothing); v === nothing ? nothing : string(v) end
+  instructions = let v = get(msg, :instructions, nothing); v === nothing ? nothing : string(v) end
+  update_agent!(id; soul, instructions)
+  handle_agents_list()
+end
+
+function handle_agent_delete(msg)
+  id = string(get(msg, :id, ""))
+  if id == "prosca"
+    emit(Dict("type" => "error", "text" => "Cannot delete the default agent")); return
+  end
+  if !delete_agent!(id)
+    emit(Dict("type" => "error", "text" => "Agent '$id' not found")); return
+  end
+  handle_agents_list()
+end
+
+# ── Conversation CRUD ────────────────────────────────────────────────
+
+function handle_conversations_list()
+  rows = SQLite.DBInterface.execute(DB, """
+    SELECT * FROM conversations ORDER BY updated_at DESC
+  """) |> SQLite.rowtable
+  data = [Dict(
+    "id" => r.id, "agent_id" => r.agent_id, "title" => r.title,
+    "handed_off_to" => something(r.handed_off_to, nothing),
+    "handed_off_from" => something(r.handed_off_from, nothing),
+    "created_at" => r.created_at, "updated_at" => r.updated_at
+  ) for r in rows]
+  emit(Dict("type" => "conversations", "data" => data))
+end
+
+function handle_conversation_create(msg)
+  agent_id = string(get(msg, :agent_id, "prosca"))
+  haskey(AGENTS, agent_id) || (emit(Dict("type" => "error", "text" => "Unknown agent '$agent_id'")); return)
+  id = string(UUIDs.uuid4())
+  SQLite.execute(DB, """
+    INSERT INTO conversations (id, agent_id, title, created_at, updated_at)
+    VALUES (?, ?, 'New chat', datetime('now'), datetime('now'))
+  """, (id, agent_id))
+  handle_conversations_list()
+end
+
+function handle_conversation_delete(msg)
+  id = string(get(msg, :id, ""))
+  SQLite.execute(DB, "DELETE FROM conversations WHERE id=?", (id,))
+  delete!(GUI_CONVERSATIONS, id)
+  handle_conversations_list()
+end
+
+function handle_conversation_update_title(msg)
+  id = string(get(msg, :id, ""))
+  title = string(get(msg, :title, ""))
+  SQLite.execute(DB, "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
+  handle_conversations_list()
+end
+
 # ── Scheduler ─────────────────────────────────────────────────────────
 
 function scheduler_tick!()
@@ -775,7 +860,8 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
     @async begin
         lock(AGENT_LOCK)
         try
-            run_agent(text, conv.outbox, conv.inbox;
+            agent = get(AGENTS, conv.agent_id, default_agent())
+            run_agent(text, conv.outbox, conv.inbox, agent;
                       session_history=conv.history, auto_allowed=conv.auto_allowed,
                       conversation_id=conv_id)
         finally
@@ -848,6 +934,8 @@ emit(Dict("type" => "unseen_count", "count" => Scheduler.unseen_notable_count(DB
 
 # Signal ready
 emit(Dict("type" => "ready"))
+handle_agents_list()
+handle_conversations_list()
 
 while !eof(stdin)
   line = readline()
@@ -869,12 +957,14 @@ while !eof(stdin)
   try
     if msg_type == "user_message"
       text = string(get(msg, :text, ""))
+      agent_id = string(get(msg, :agent_id, "prosca"))
       last_user_activity_at[] = now(Dates.UTC)
-      conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id)
+      agent = get(AGENTS, agent_id, default_agent())
+      conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
       @async begin
         lock(AGENT_LOCK)
         try
-          run_agent(text, conv.outbox, conv.inbox;
+          run_agent(text, conv.outbox, conv.inbox, agent;
                     session_history=conv.history, auto_allowed=conv.auto_allowed,
                     conversation_id=conv_id)
         finally
@@ -951,6 +1041,22 @@ while !eof(stdin)
       handle_routine_runs_list(msg)
     elseif msg_type == "routine_runs_mark_seen"
       handle_routine_runs_mark_seen(msg)
+    elseif msg_type == "agents_list"
+      handle_agents_list()
+    elseif msg_type == "agent_create"
+      @async handle_agent_create(msg)
+    elseif msg_type == "agent_update"
+      handle_agent_update(msg)
+    elseif msg_type == "agent_delete"
+      handle_agent_delete(msg)
+    elseif msg_type == "conversations_list"
+      handle_conversations_list()
+    elseif msg_type == "conversation_create"
+      handle_conversation_create(msg)
+    elseif msg_type == "conversation_delete"
+      handle_conversation_delete(msg)
+    elseif msg_type == "conversation_update_title"
+      handle_conversation_update_title(msg)
     else
       emit(Dict("type" => "error", "text" => "Unknown message type: $msg_type"))
     end
