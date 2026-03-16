@@ -47,39 +47,40 @@
 ```julia
 # agents.jl — Multi-agent system: struct, loading, creation, migration
 
+@use "github.com/jkroso/URI.jl/FSPath" FSPath
+
 struct Agent
     id::String
     personality::String
     instructions::String
     skills::Dict{String, Skill}
-    path::String
+    path::FSPath
 end
 
 const AGENTS = Dict{String, Agent}()
 
 """Load skills from an agent's skills/ directory."""
-function load_agent_skills(agent_path::String)::Dict{String, Skill}
+function load_agent_skills(agent_path::FSPath)::Dict{String, Skill}
     skills = Dict{String, Skill}()
-    skills_dir = joinpath(agent_path, "skills")
-    !isdir(skills_dir) && return skills
-    for file in readdir(skills_dir; join=true)
-        endswith(file, ".md") || continue
-        skill = parse_skill(file)
+    skills_dir = agent_path * "skills"
+    isdir(skills_dir) || return skills
+    for file in skills_dir.children
+        file.extension == "md" || continue
+        skill = parse_skill(string(file))
         skill === nothing && continue
         skills[skill.name] = skill
     end
     skills
 end
 
-const AGENTS_DIR = joinpath(string(HOME), "agents")
+const AGENTS_DIR = HOME*"agents"
 
 """Load a single agent from its directory."""
-function load_agent(agent_dir::String)::Union{Agent, Nothing}
-    id = basename(agent_dir)
-    soul_path = joinpath(agent_dir, "soul.md")
-    instr_path = joinpath(agent_dir, "instructions.md")
-    isfile(soul_path) || return nothing
-    isfile(instr_path) || return nothing
+function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
+    id = agent_dir.name
+    soul_path = agent_dir*"soul.md"
+    instr_path = agent_dir*"instructions.md"
+    isfile(soul_path) && isfile(instr_path) || return nothing
     Agent(
         id,
         read(soul_path, String),
@@ -93,7 +94,7 @@ end
 function load_agents!()
     empty!(AGENTS)
     isdir(AGENTS_DIR) || return
-    for entry in readdir(AGENTS_DIR; join=true)
+    for entry in AGENTS_DIR.children
         isdir(entry) || continue
         agent = load_agent(entry)
         agent === nothing && continue
@@ -106,25 +107,22 @@ end
 function migrate_to_agents!()
     isdir(AGENTS_DIR) && return  # already migrated
 
-    home_str = string(HOME)
-    root_soul = joinpath(home_str, "soul.md")
-    root_instr = joinpath(home_str, "instructions.md")
+    root_soul = HOME * "soul.md"
+    root_instr = HOME * "instructions.md"
     (isfile(root_soul) && isfile(root_instr)) || return
 
-    prosca_dir = joinpath(AGENTS_DIR, "prosca")
-    mkpath(prosca_dir)
+    prosca_dir = mkpath(AGENTS_DIR * "prosca")
 
-    cp(root_soul, joinpath(prosca_dir, "soul.md"))
-    cp(root_instr, joinpath(prosca_dir, "instructions.md"))
+    cp(string(root_soul), string(prosca_dir * "soul.md"))
+    cp(string(root_instr), string(prosca_dir * "instructions.md"))
 
     # Copy skills if they exist
-    root_skills = joinpath(home_str, "skills")
+    root_skills = HOME * "skills"
     if isdir(root_skills)
-        prosca_skills = joinpath(prosca_dir, "skills")
-        mkpath(prosca_skills)
-        for file in readdir(root_skills; join=true)
-            endswith(file, ".md") || continue
-            cp(file, joinpath(prosca_skills, basename(file)))
+        prosca_skills = mkpath(prosca_dir * "skills")
+        for file in root_skills.children
+            file.extension == "md" || continue
+            cp(string(file), string(prosca_skills * file.name))
         end
     end
 
@@ -133,11 +131,11 @@ end
 
 """Create a new agent with LLM-generated soul and instructions."""
 function create_agent!(name::String, description::String)::Union{Agent, Nothing}
-    agent_dir = joinpath(AGENTS_DIR, name)
+    agent_dir = AGENTS_DIR * name
     isdir(agent_dir) && return nothing  # already exists
 
     mkpath(agent_dir)
-    mkpath(joinpath(agent_dir, "skills"))
+    mkpath(agent_dir * "skills")
 
     # Generate soul.md and instructions.md via LLM
     soul_content, instr_content = try
@@ -163,8 +161,8 @@ Reply in this exact format:
         "# $name\n\n$description", "# Instructions\n\n- $description"
     end
 
-    write(joinpath(agent_dir, "soul.md"), soul_content)
-    write(joinpath(agent_dir, "instructions.md"), instr_content)
+    write(agent_dir * "soul.md", soul_content)
+    write(agent_dir * "instructions.md", instr_content)
 
     agent = load_agent(agent_dir)
     agent !== nothing && (AGENTS[name] = agent)
@@ -177,7 +175,7 @@ function delete_agent!(id::String)::Bool
     haskey(AGENTS, id) || return false
     agent = AGENTS[id]
     delete!(AGENTS, id)
-    rm(agent.path; recursive=true, force=true)
+    rm(string(agent.path); recursive=true, force=true)
     true
 end
 
@@ -185,8 +183,8 @@ end
 function update_agent!(id::String; soul::Union{String,Nothing}=nothing, instructions::Union{String,Nothing}=nothing)::Bool
     haskey(AGENTS, id) || return false
     agent = AGENTS[id]
-    soul !== nothing && write(joinpath(agent.path, "soul.md"), soul)
-    instructions !== nothing && write(joinpath(agent.path, "instructions.md"), instructions)
+    soul !== nothing && write(agent.path * "soul.md", soul)
+    instructions !== nothing && write(agent.path * "instructions.md", instructions)
     # Reload
     updated = load_agent(agent.path)
     updated !== nothing && (AGENTS[id] = updated)
