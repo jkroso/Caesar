@@ -1,29 +1,29 @@
-# 🤖 Prosca: An Agent with a Julia REPL
+# Prosca: An Agent with a Julia REPL
 
-## Overview
-
-Prosca is an intelligent, proactive AI agent built in Julia, designed to streamline your local development workflow. It leverages the power of Julia's REPL for expressive, readable computations, allowing you to work through problems step-by-step without bloated contexts.
+Prosca is an AI agent built in Julia that uses a persistent Julia REPL as its primary tool. Instead of shelling out to Bash, it evaluates Julia expressions step-by-step, keeping variables in scope across interactions.
 
 <img src="./tui_screenshot.png" alt="tui screenshot" style=""/>
 
-Notice how it remembered the name of the variable that contained the primes and used that to select the random prime. This is one of the big advantages of using a Julia REPL to run code rather than Bash like Claude Code would of used. It reduces the size of the context and the number of tokens used. Also Julia code is easier to validate than Bash since it comes with it's own parser and a community of tools so while Prosca currently is a bit dangerous compared to Claude, which asks for permission to `ls`, it ultimately could be safe enough to trust with your own computer since the verification code could be fairly permissive while still having zero false negatives.
+The REPL is shared — you can work in it alongside Prosca. Define a function, then ask Prosca to write tests for it by name. No copy-pasting needed since Prosca can introspect the same module scope you're working in.
 
-That REPL it's using is a normal Julia REPL too by way so I can play around in it alongside Prosca. I could even ask Prosca questions about values I've calculated. Or I could ask Prosca to write tests for a function I just defined and I wouldn't have to copy and paste the code of the function, I could just tell Prosca the name of the function. Actually, I could even make Prosca figure it out for himself what function I'm talking about, since he can introspect the REPL just as well as I can but that seems unnecessarily mean.
+Using Julia instead of Bash for tool calls means smaller contexts, fewer tokens, and code that's easier to validate statically. The interpreter runs every expression through a safety system that checks filesystem paths, blocks `eval`/`ENV` mutation, and prompts for approval on unknown operations.
 
-## Key Features
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| 🧠 Julia REPL | Primary tool for computations, file I/O, HTTP, data processing, and more. |
-| 💾 Persistent Memory | Remembers context across sessions for continuity. |
-| 🔧 Built-in Tools | git_branch_and_pr, prune_memories, web_search. |
-| 🚀 Skills | /commit for well-structured git commits. |
-| 🔗 MCP Integration | Connects to MCP servers for extended capabilities. |
-| 💻 Interfaces | CLI (cli.jl), TUI (tui.jl), and event-driven (events.jl). |
+| Julia REPL | Sandboxed interpreter with safety validation and REPL-style soft scope |
+| Multi-agent | Create agents with distinct personalities, instructions, and skills. Agents can hand off tasks to each other |
+| Persistent memory | RAG-backed memory with per-agent and per-conversation scoping |
+| Tools | git_branch_and_pr, prune_memories, web_search — extensible via `~/Prosca/tools/` |
+| Skills | Markdown-defined prompts activated by `/name` — extensible via `~/Prosca/skills/` |
+| Commands | CLI commands via `;name` — model switching, plugin management |
+| Interfaces | TUI (`tui.jl`) with chat + live REPL log pane, CLI (`cli.jl`), Telegram gateway |
+| LLM support | Ollama, OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI via PromptingTools.jl |
 
 ## Getting Started
 
-1. Clone or set up the project.
-2. Install [Kip](https://github.com/jkroso/Kip.jl)
-3. Open a REPL connected to [Kaimon](https://github.com/kahliburke/Kaimon.jl)
-2. Run `julia tui.jl` to start Prosca.
+1. Install [Kip](https://github.com/jkroso/Kip.jl)
+2. Clone this repo
+3. Run `julia tui.jl` for the TUI or `julia cli.jl` for the CLI
+4. Configuration lives in `~/Prosca/config.yaml` (created on first run)
