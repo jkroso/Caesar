@@ -91,19 +91,6 @@ function handle_skills_list()
   emit(Dict("type" => "skills", "data" => skills))
 end
 
-function handle_mcp_list()
-  servers = Dict{String, Any}()
-  for (name, server) in MCP_SERVERS
-    tools = [Dict("name" => t.name, "description" => t.description, "schema" => Dict()) for t in server.tools]
-    servers[name] = Dict(
-      "url" => server.url,
-      "runtime" => server.is_runtime,
-      "connected" => server.connected,
-      "tools" => tools
-    )
-  end
-  emit(Dict("type" => "mcp_servers", "data" => servers))
-end
 
 const _models_cache = Ref{Union{Vector{Dict{String,String}}, Nothing}}(nothing)
 const _models_cache_time = Ref{Float64}(0.0)
@@ -994,8 +981,6 @@ while !eof(stdin)
       handle_config_set(string(msg.key), msg.value)
     elseif msg_type == "skills_list"
       handle_skills_list()
-    elseif msg_type == "mcp_list"
-      handle_mcp_list()
     elseif msg_type == "models_list"
       @async handle_models_list()
     elseif msg_type == "reset"

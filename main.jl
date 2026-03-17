@@ -1,5 +1,4 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
-@use "./validate_ex" validate_ex
 @use LinearAlgebra...
 @use PromptingTools
 @use RAGTools...
@@ -11,8 +10,8 @@
 @use HTTP
 @use YAML
 @use UUIDs
-
-@use "./mcp_client" MCPTool MCPServer MCP_SERVERS send_jsonrpc mcp_connect! mcp_call_tool mcp_disconnect! load_mcp_servers! runtime_server
+@use "./safety"...
+@use "./repl" interpret
 
 const HOME = mkpath(home() * "Prosca")
 
@@ -312,11 +311,6 @@ end
 
 # ============= TOOLS =============
 
-function is_allowed_path(path::String)::Bool
-  p = abspath(expanduser(path))
-  any(startswith(p, abspath(expanduser(string(d)))) for d in CONFIG["allowed_dirs"])
-end
-
 # Auto-discover tools from tools/ folder
 const TOOLS = Dict{String, Function}()
 const TOOL_SCHEMAS = String[]
@@ -412,6 +406,7 @@ struct Agent
     instructions::String
     skills::Dict{String, Skill}
     path::FSPath
+    repl_module::Module
 end
 
 const AGENTS = Dict{String, Agent}()
@@ -443,7 +438,8 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
         read(soul_path, String),
         read(instr_path, String),
         load_agent_skills(agent_dir),
-        agent_dir
+        agent_dir,
+        Module(Symbol("agent_$id"))
     )
 end
 
@@ -543,15 +539,6 @@ for agent_id in keys(AGENTS)
   rebuild_memory_index(; agent_id)
 end
 
-# ============= MCP SERVERS =============
-const MCP_CONFIG_PATH = string(HOME * "mcp_servers.json")
-if !isfile(MCP_CONFIG_PATH)
-  write(MCP_CONFIG_PATH, JSON3.write(Dict(
-    "kaimon" => Dict("url" => "http://localhost:2828", "runtime" => true)
-  )))
-end
-load_mcp_servers!(HOME)
-
 # ============= AGENT =============
 function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=nothing)::String
   all_skills = merged_skills(agent)
@@ -587,59 +574,6 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
     """
   end
 
-  # Build MCP tool sections
-  runtime = runtime_server()
-  runtime_section = if runtime !== nothing
-    # Only surface key introspection tools with short descriptions — full list bloats prompt
-    key_tools = Dict(
-      "list_names" => "List variables/functions currently in REPL scope",
-      "type_info" => "Inspect a type's fields, supertypes, methods",
-      "search_methods" => "Find methods matching a signature or name",
-    )
-    introspection_lines = String[]
-    for t in runtime.tools
-      t.name == "ex" && continue
-      if haskey(key_tools, t.name)
-        push!(introspection_lines, "- $(runtime.name).$(t.name): $(key_tools[t.name])")
-      end
-    end
-    introspection_str = join(introspection_lines, "\n")
-    """
-    ## Julia Runtime (via $(runtime.name).ex) — USE THIS BY DEFAULT
-    You have a persistent Julia REPL. This is your PRIMARY tool. Write Julia code for almost everything:
-    - Read files: read("path", String)
-    - List dirs: readdir("path")
-    - HTTP requests: using HTTP; HTTP.get(url)
-    - Data processing: any Julia code
-    - Package management: using Pkg; Pkg.add("Foo")
-
-    Use $(runtime.name).ex for everything — file I/O, shell commands (via `run(\`cmd\`)`), HTTP, data processing, etc.
-
-    To execute (fire-and-forget): {"tool": "$(runtime.name).ex", "args": {"e": "your_code_here"}}
-    To execute and SEE the result: {"tool": "$(runtime.name).ex", "args": {"e": "your_code_here", "q": false}}
-    IMPORTANT: By default q=true which HIDES the return value. Use "q": false whenever you need to see output.
-    Example: {"tool": "$(runtime.name).ex", "args": {"e": "read(\\"README.md\\", String)", "q": false}}
-    Shell example: {"tool": "$(runtime.name).ex", "args": {"e": "run(\`git status\`)", "q": false}}
-    IMPORTANT: Always escape double quotes inside the "e" value with backslash.
-
-    ## Julia Introspection
-    $introspection_str
-    """
-  else
-    ""
-  end
-
-  # Non-runtime MCP tools
-  other_mcp_tools = String[]
-  for (sname, server) in MCP_SERVERS
-    server.is_runtime && continue
-    !server.connected && continue
-    for t in server.tools
-      push!(other_mcp_tools, "- $sname.$(t.name): $(t.description)")
-    end
-  end
-  other_mcp_section = isempty(other_mcp_tools) ? "" : "\n## External Tools (MCP)\n$(join(other_mcp_tools, "\n"))\n"
-
   """
   $(agent.personality)
 
@@ -648,11 +582,15 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
 
   You have persistent memory across sessions.
 
-  $runtime_section
+  ## Julia REPL
+  You have a persistent Julia REPL. Use {"eval": "code"} to evaluate Julia expressions.
+  Variables and functions persist across evaluations.
+  Use standard Julia for introspection: names(@__MODULE__), methods(f), typeof(x), etc.
+
   ## Built-in Tools
   Available tools (respond with valid JSON only):
   $(join(TOOL_SCHEMAS, "\n"))
-  $other_mcp_section$skill_list
+  $skill_list
   Or {"final_answer": "your response here"}
   $skill_injection$handoff_section
   """
@@ -755,12 +693,13 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
 
   max_steps = get(CONFIG, "max_steps", 15)
   for step in 1:max_steps
-    # Periodic runtime awareness: every 5 tool calls, refresh REPL scope
-    if runtime_server() !== nothing && step > 1 && step % 5 == 0
-      try
-        scope = mcp_call_tool(runtime_server(), "list_names", Dict{String,Any}())
-        push!(messages, PromptingTools.UserMessage("[Runtime scope reminder] Variables in Julia REPL:\n$scope"))
-      catch; end
+    # Periodic REPL scope reminder
+    if step > 1 && step % 5 == 0
+      user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
+      if !isempty(user_names)
+        scope = join(user_names, ", ")
+        push!(messages, PromptingTools.UserMessage("[REPL scope] Variables: $scope"))
+      end
     end
 
     response_text = try
@@ -800,7 +739,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       # Check if it looks like it was TRYING to be JSON (malformed tool call)
       if contains(response_text, "\"tool\"") && contains(response_text, "\"args\"")
         push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Remember to escape quotes inside strings with \\\\\" — for example: {\"tool\": \"kaimon.ex\", \"args\": {\"e\": \"read(\\\\\"README.md\\\\\", String)\"}}. Try again."))
+        push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Remember to escape quotes inside strings with \\\\\". Try again."))
         @warn "Malformed JSON from LLM, asking to retry" response_text
         continue
       end
@@ -869,47 +808,32 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       break  # exits the ReAct loop, then AgentDone is emitted after the loop
     end
 
+    if haskey(parsed, :eval)
+      code = string(parsed.eval)
+      result = try
+        interpret(agent.repl_module, code; outbox, inbox)
+      catch e
+        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+      end
+      put!(outbox, ToolResult("eval", result))
+      log_memory("Eval: $code → $(result[1:min(500,end)])"; agent_id=agent.id, conversation_id)
+      push!(messages, PromptingTools.AIMessage(response_text))
+      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      continue
+    end
+
     tool_name = get(parsed, :tool, nothing)
     tn = tool_name === nothing ? "" : string(tool_name)
     args_str = haskey(parsed, :args) ? JSON3.write(parsed.args) : "{}"
 
-    # Resolve tool: built-in first, then MCP servers
-    is_builtin = haskey(TOOLS, tn)
-    mcp_server = nothing
-    mcp_tool_name = ""
-    if !is_builtin && contains(tn, ".")
-      parts = split(tn, "."; limit=2)
-      server_name, mcp_tool_name = String(parts[1]), String(parts[2])
-      if haskey(MCP_SERVERS, server_name) && MCP_SERVERS[server_name].connected
-        mcp_server = MCP_SERVERS[server_name]
-      end
-    end
-
-    if !is_builtin && mcp_server === nothing
+    if !haskey(TOOLS, tn)
       push!(messages, PromptingTools.AIMessage(response_text))
-      push!(messages, PromptingTools.UserMessage("Error: Unknown tool '$tn'. Use a valid tool name or return {\"final_answer\": \"...\"}"))
+      push!(messages, PromptingTools.UserMessage("Error: Unknown tool '$tn'. Use {\"eval\": \"...\"} for Julia code, or use a valid tool name, or return {\"final_answer\": \"...\"}"))
       continue
     end
 
     # Determine if confirmation is needed
-    needs_confirm = false
-    if is_builtin
-      needs_confirm = tn in TOOL_CONFIRM && tn ∉ auto_allowed
-    elseif mcp_server !== nothing
-      if mcp_server.is_runtime
-        # Runtime server: no confirmation unless ex fails validation
-        if mcp_tool_name == "ex"
-          if haskey(parsed, :args) && hasproperty(parsed.args, :e)
-            needs_confirm = !validate_ex(string(parsed.args.e))
-          else
-            needs_confirm = true  # missing expression requires confirmation
-          end
-        end
-      else
-        # Non-runtime MCP: always confirm unless auto-allowed
-        needs_confirm = tn ∉ auto_allowed
-      end
-    end
+    needs_confirm = tn in TOOL_CONFIRM && tn ∉ auto_allowed
 
     if needs_confirm
       req_id = rand(UInt64)
@@ -928,16 +852,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
 
     # Execute the tool
     result = try
-      if is_builtin
-        TOOLS[tn](parsed.args)
-      else
-        args_dict = if haskey(parsed, :args)
-          Dict{String,Any}(string(k) => v for (k, v) in pairs(parsed.args))
-        else
-          Dict{String,Any}()
-        end
-        mcp_call_tool(mcp_server, mcp_tool_name, args_dict)
-      end
+      TOOLS[tn](parsed.args)
     catch e
       "Tool error ($(typeof(e))): $(sprint(showerror, e))"
     end
