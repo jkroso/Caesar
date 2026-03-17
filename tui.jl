@@ -15,6 +15,8 @@
   input::TextInput      = TextInput(; label="You: ", focused=true, tick=0)
   messages::Vector{Vector{Span}} = Vector{Span}[]
   scroll::ScrollPane    = ScrollPane(Vector{Span}[]; following=true, word_wrap=true)
+  repl_scroll::ScrollPane = ScrollPane(Vector{Span}[]; following=true, word_wrap=true)
+  repl_log_pos::Int     = 0               # bytes read so far from repl.log
   pending_tool::Union{Nothing, ToolCallRequest} = nothing
   agent_busy::Bool      = false
   quit::Bool            = false
@@ -145,6 +147,34 @@ function handle_backtab!(m::ProscaModel)
   m.completion_idx = mod1(m.completion_idx - 1, length(m.completions))
 end
 
+# ── Poll REPL log for new lines ───────────────────────────────────────
+
+function poll_repl_log!(m::ProscaModel)
+  agent = default_agent()
+  logpath = string(agent.path * "repl.log")
+  isfile(logpath) || return
+  sz = filesize(logpath)
+  sz <= m.repl_log_pos && return
+  new_text = open(logpath) do io
+    seek(io, m.repl_log_pos)
+    txt = read(io, String)
+    m.repl_log_pos = position(io)
+    txt
+  end
+  for line in split(new_text, '\n')
+    style = if startswith(line, "julia>")
+      tstyle(:accent, bold=true)
+    elseif startswith(line, "       ")
+      tstyle(:accent)
+    elseif startswith(line, "ERROR:")
+      tstyle(:error)
+    else
+      tstyle(:text_dim)
+    end
+    push_line!(m.repl_scroll, [Span(line, style)])
+  end
+end
+
 # ── Poll agent channel events ─────────────────────────────────────────
 
 function drain_agent_events!(m::ProscaModel)
@@ -253,6 +283,7 @@ end
 
 function view(m::ProscaModel, f::Frame)
   drain_agent_events!(m)
+  poll_repl_log!(m)
 
   buf = f.buffer
   area = f.area
@@ -266,7 +297,11 @@ function view(m::ProscaModel, f::Frame)
   render(tabs, tab_rect, buf)
 
   if m.active_tab == 1
-    render_chat!(m, content_rect, buf)
+    # Split content: chat on left, REPL log on right
+    hsplit = Layout(Horizontal, Constraint[Percentage(60), Percentage(40)])
+    hpanes = split_layout(hsplit, content_rect)
+    render_chat!(m, hpanes[1], buf)
+    render_repl_log!(m, hpanes[2], buf)
   elseif m.active_tab == 2
     render_help!(content_rect, buf)
   elseif m.active_tab == 3
@@ -334,6 +369,13 @@ function render_chat!(m::ProscaModel, rect::Rect, buf::Buffer)
   m.scroll.block = Block(title="Chat", border_style=tstyle(:border),
                          title_style=tstyle(:primary, bold=true))
   render(m.scroll, rect, buf)
+end
+
+function render_repl_log!(m::ProscaModel, rect::Rect, buf::Buffer)
+  agent = default_agent()
+  m.repl_scroll.block = Block(title="REPL ($(agent.id))", border_style=tstyle(:border),
+                               title_style=tstyle(:accent, bold=true))
+  render(m.repl_scroll, rect, buf)
 end
 
 function render_help!(rect::Rect, buf::Buffer)
