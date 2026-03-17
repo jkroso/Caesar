@@ -2,8 +2,7 @@
 # Prosca TUI — Tachikoma-based terminal interface for the Prosca agent
 # ═══════════════════════════════════════════════════════════════════════
 
-@use "." ToolCallRequest HOME CONFIG AGENTS default_agent
-@use Tachikoma: view, update!, should_quit
+@use "."... AGENTS
 @use Tachikoma...
 
 # ── Model ─────────────────────────────────────────────────────────────
@@ -24,7 +23,7 @@
   completion_idx::Int   = 0
 end
 
-should_quit(m::ProscaModel) = m.quit
+Tachikoma.should_quit(m::ProscaModel) = m.quit
 
 # ── Tab labels ────────────────────────────────────────────────────────
 
@@ -197,7 +196,7 @@ end
 
 # ── Event handling ────────────────────────────────────────────────────
 
-function update!(m::ProscaModel, e::KeyEvent)
+function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
   if e.key == :ctrl && e.char == 'q'
     m.quit = true
     return
@@ -281,7 +280,7 @@ end
 
 # ── View rendering ────────────────────────────────────────────────────
 
-function view(m::ProscaModel, f::Frame)
+function Tachikoma.view(m::ProscaModel, f::Frame)
   drain_agent_events!(m)
   poll_repl_log!(m)
 
@@ -298,7 +297,7 @@ function view(m::ProscaModel, f::Frame)
 
   if m.active_tab == 1
     # Split content: chat on left, REPL log on right
-    hsplit = Layout(Horizontal, Constraint[Percentage(60), Percentage(40)])
+    hsplit = Layout(Horizontal, Constraint[Tachikoma.Percent(60), Tachikoma.Percent(40)])
     hpanes = split_layout(hsplit, content_rect)
     render_chat!(m, hpanes[1], buf)
     render_repl_log!(m, hpanes[2], buf)

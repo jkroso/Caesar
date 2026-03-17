@@ -1,4 +1,4 @@
-@use "./main"...
+@use "." HOME run_agent default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage
 
 println("🧠 Prosca started")
 println("Brain: $HOME")
@@ -55,7 +55,7 @@ while true
       println("Available: $(join(keys(COMMANDS), ", "))")
     end
   else
-    @async run_agent(input, outbox, inbox)
+    @async run_agent(input, outbox, inbox, default_agent())
     handle_events(outbox)
   end
 end

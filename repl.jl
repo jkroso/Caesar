@@ -3,9 +3,10 @@
 # Executes code expression-by-expression, intercepting function calls
 # and validating them via the safety dispatch system before allowing execution.
 
-using JuliaInterpreter
-using JSON3
-import JuliaInterpreter: step_expr!, pc_expr, Frame, SSAValue, lookup
+@use JuliaInterpreter
+@use JuliaInterpreter: step_expr!, pc_expr, Frame, SSAValue, lookup
+@use "./safety"...
+@use JSON3
 
 const _INTERP = JuliaInterpreter.RecursiveInterpreter()
 
@@ -22,6 +23,53 @@ function _flatten_toplevel(ex)
     push!(stmts, ex)
   end
   stmts
+end
+
+"""Collect all variable names assigned at the top level of a list of statements."""
+function _collect_assigned_vars(stmts)::Set{Symbol}
+  vars = Set{Symbol}()
+  for stmt in stmts
+    _collect_assignments!(vars, stmt)
+  end
+  vars
+end
+
+const _ASSIGN_HEADS = Set([:(=), :(+=), :(-=), :(*=), :(/=), :(÷=), :(%=), :(^=),
+                           :(&=), :(|=), :(⊻=), :(>>>=), :(>>=), :(<<=)])
+
+function _collect_assignments!(vars::Set{Symbol}, ex)
+  ex isa Expr || return
+  if ex.head in _ASSIGN_HEADS && ex.args[1] isa Symbol
+    push!(vars, ex.args[1])
+  elseif ex.head in (:block, :toplevel)
+    for arg in ex.args
+      _collect_assignments!(vars, arg)
+    end
+  end
+end
+
+"""Inject `global var1, var2, ...` into for/while loop bodies so that
+outer variables are accessible (REPL-style soft scope)."""
+function _inject_globals(ex, vars::Set{Symbol})
+  ex isa Expr || return ex
+  if ex.head in (:for, :while)
+    body = ex.args[end]
+    if body isa Expr && body.head == :block
+      # Find which vars are assigned in this loop body
+      loop_vars = Set{Symbol}()
+      _collect_assignments!(loop_vars, body)
+      needed = intersect(loop_vars, vars)
+      if !isempty(needed)
+        global_decl = Expr(:global, needed...)
+        new_body = Expr(:block, global_decl, body.args...)
+        new_args = copy(ex.args)
+        new_args[end] = new_body
+        return Expr(ex.head, [_inject_globals(a, vars) for a in new_args]...)
+      end
+    end
+    return Expr(ex.head, [_inject_globals(a, vars) for a in ex.args]...)
+  end
+  Expr(ex.head, [_inject_globals(a, vars) for a in ex.args]...)
 end
 
 # Functions blocked by name — catches per-module definitions (e.g. Module.eval)
@@ -75,6 +123,16 @@ function interpret(mod::Module, code::String;
                    log::Union{IO,Nothing}=nothing)
   parsed = Meta.parseall(code)
   stmts = _flatten_toplevel(parsed)
+  # Inject global declarations into loops for REPL-style soft scope
+  # Include both variables assigned in this code AND existing module bindings
+  assigned = _collect_assigned_vars(stmts)
+  for n in names(mod; all=true)
+    n == nameof(mod) && continue
+    push!(assigned, n)
+  end
+  if !isempty(assigned)
+    stmts = [_inject_globals(s, assigned) for s in stmts]
+  end
   isempty(stmts) && return "nothing"
 
   # Log the input
@@ -85,24 +143,35 @@ function interpret(mod::Module, code::String;
   end
 
   last_result = nothing
+  error_thrown = nothing
 
-  for stmt in stmts
-    # Wrap non-Expr atoms (e.g. bare symbols, literals) so Frame can handle them
-    expr = stmt isa Expr ? stmt : Expr(:block, stmt)
+  try
+    for stmt in stmts
+      # Wrap non-Expr atoms (e.g. bare symbols, literals) so Frame can handle them
+      expr = stmt isa Expr ? stmt : Expr(:block, stmt)
 
-    frame = try
-      Frame(mod, expr)
-    catch e
-      err_msg = "Failed to lower expression: $(sprint(showerror, e))"
-      if log !== nothing
-        println(log, "ERROR: $err_msg")
-        println(log)
-        flush(log)
+      frame = try
+        Frame(mod, expr)
+      catch e
+        error_thrown = e
+        err_msg = "Failed to lower expression: $(sprint(showerror, e))"
+        if log !== nothing
+          println(log, "ERROR: $err_msg")
+          println(log)
+          flush(log)
+        end
+        throw(ErrorException(err_msg))
       end
-      throw(ErrorException(err_msg))
-    end
 
-    last_result = _step_frame!(frame; outbox, inbox)
+      last_result = _step_frame!(frame; outbox, inbox)
+    end
+  catch e
+    if log !== nothing && error_thrown !== e
+      println(log, "ERROR: $(sprint(showerror, e))")
+      println(log)
+      flush(log)
+    end
+    rethrow()
   end
 
   result_str = string(last_result)

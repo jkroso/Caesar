@@ -67,3 +67,5 @@ function command_verdict(cmd::Cmd)::SafetyVerdict
   end
   Ask
 end
+
+export SafetyDeniedError, validate, SafetyVerdict, Allow, Deny, Ask

@@ -298,7 +298,7 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   soul_path = agent_dir*"soul.md"
   instr_path = agent_dir*"instructions.md"
   isfile(soul_path) && isfile(instr_path) || return nothing
-  logfile = open(string(agent_dir * "repl.log"), "a")
+  logfile = open(string(agent_dir * "repl.log"), "w")
   Agent(id, read(soul_path, String), read(instr_path, String),
         load_agent_skills(agent_dir), agent_dir, Module(Symbol("agent_$id")), logfile)
 end
@@ -315,25 +315,6 @@ function load_agents!()
   end
 end
 
-function migrate_to_agents!()
-  isdir(AGENTS_DIR) && return
-  root_soul = HOME * "soul.md"
-  root_instr = HOME * "instructions.md"
-  (isfile(root_soul) && isfile(root_instr)) || return
-  prosca_dir = mkpath(AGENTS_DIR * "prosca")
-  cp(root_soul, prosca_dir * "soul.md")
-  cp(root_instr, prosca_dir * "instructions.md")
-  root_skills = HOME * "skills"
-  if isdir(root_skills)
-    prosca_skills = mkpath(prosca_dir * "skills")
-    for file in root_skills.children
-      file.extension == "md" || continue
-      cp(file, prosca_skills * file.name)
-    end
-  end
-  @info "Migrated root soul.md/instructions.md to agents/prosca/"
-end
-
 function create_agent!(name::String, description::String)::Union{Agent, Nothing}
   agent_dir = AGENTS_DIR * name
   isdir(agent_dir) && return nothing
@@ -343,11 +324,11 @@ function create_agent!(name::String, description::String)::Union{Agent, Nothing}
     gen_msgs = [
       PromptingTools.SystemMessage("""You are creating a new AI agent persona. Generate two markdown files based on the description.
 
-Reply in this exact format:
-===SOUL===
-<soul.md content: personality, tone, values — 3-5 short paragraphs>
-===INSTRUCTIONS===
-<instructions.md content: capabilities, constraints, how to approach tasks — bullet points>"""),
+      Reply in this exact format:
+      ===SOUL===
+      <soul.md content: personality, tone, values — 3-5 short paragraphs>
+      ===INSTRUCTIONS===
+      <instructions.md content: capabilities, constraints, how to approach tasks — bullet points>"""),
       PromptingTools.UserMessage("Agent name: $name\nDescription: $description")
     ]
     result = call_llm(gen_msgs).content
@@ -567,13 +548,29 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       result = JSON3.read(json_str)
       result isa AbstractDict ? result : nothing
     catch
-      nothing
+      # Try extracting just the first JSON object (LLM may concatenate multiple)
+      first_obj = match(r"\{(?:[^{}]|\{[^{}]*\})*\}", json_str)
+      if first_obj !== nothing
+        try
+          result = JSON3.read(first_obj.match)
+          result isa AbstractDict ? result : nothing
+        catch
+          nothing
+        end
+      else
+        nothing
+      end
     end
 
     if parsed === nothing
-      if contains(response_text, "\"tool\"") && contains(response_text, "\"args\"")
+      looks_like_json = contains(response_text, "\"tool\"") && contains(response_text, "\"args\"") ||
+                        contains(response_text, "\"eval\"") ||
+                        contains(response_text, "\"final_answer\"") ||
+                        contains(response_text, "\"skill\"") ||
+                        contains(response_text, "\"handoff\"")
+      if looks_like_json
         push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Remember to escape quotes inside strings with \\\\\". Try again."))
+        push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Return exactly ONE JSON object per response. Try again."))
         @warn "Malformed JSON from LLM, asking to retry" response_text
         continue
       end
@@ -793,7 +790,6 @@ function __init__()
   load_tools!()
   load_commands!()
   load_skills!()
-  migrate_to_agents!()
   load_agents!()
 
   # Build memory indexes
@@ -801,3 +797,6 @@ function __init__()
     rebuild_memory_index(; agent_id)
   end
 end
+
+export AgentMessage, ToolCallRequest, ToolResult, AgentDone, UserInput, ToolApproval, ToolApprovalRetracted,
+       run_agent, HOME, CONFIG, default_agent, Agent

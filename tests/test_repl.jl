@@ -17,7 +17,14 @@ struct ToolCallRequest; name::String; args::String; id::UInt64; end
 struct ToolApproval; id::UInt64; decision::Symbol; end
 
 include("../safety.jl")
-include("../repl.jl")
+
+# Include repl.jl, skipping @use lines (deps already loaded above)
+import JuliaInterpreter: step_expr!, pc_expr, Frame, SSAValue, lookup
+let src = read(joinpath(@__DIR__, "..", "repl.jl"), String)
+  # Strip @use lines — their deps are already in scope
+  src = replace(src, r"^@use .*$"m => "")
+  include_string(@__MODULE__, src, joinpath(@__DIR__, "..", "repl.jl"))
+end
 
 # ── Safety module tests ──────────────────────────────────────────────
 
@@ -276,6 +283,46 @@ end
   @test contains(content, "         x + 1")
 
   rm(logpath)
+end
+
+@testset "interpret — REPL log on error" begin
+  mod = Module(:test_log_err)
+  logpath = tempname("/tmp") * ".log"
+  logfile = open(logpath, "w")
+
+  # This should throw but still log the error
+  try
+    interpret(mod, "error(\"boom\")"; log=logfile)
+  catch
+  end
+  close(logfile)
+
+  content = read(logpath, String)
+  @test contains(content, "julia> error(\"boom\")")
+  @test contains(content, "ERROR:")
+  @test contains(content, "boom")
+
+  rm(logpath)
+end
+
+@testset "interpret — soft scope in loops" begin
+  mod = Module(:test_softscope)
+  # Variables assigned before a loop should be accessible inside it (REPL behavior)
+  interpret(mod, "x = 0")
+  interpret(mod, "for i in 1:5\n    x += i\nend")
+  @test interpret(mod, "x") == "15"
+end
+
+@testset "interpret — soft scope in while" begin
+  mod = Module(:test_softscope_while)
+  result = interpret(mod, "n = 0\nwhile n < 10\n    n += 1\nend")
+  @test interpret(mod, "n") == "10"
+end
+
+@testset "interpret — soft scope in begin block" begin
+  mod = Module(:test_softscope_begin)
+  interpret(mod, "begin\n    a = 1\n    b = 2\nend")
+  @test interpret(mod, "a + b") == "3"
 end
 
 @testset "interpret — module isolation" begin
