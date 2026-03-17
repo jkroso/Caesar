@@ -161,6 +161,28 @@ end
   @test_throws SafetyDeniedError interpret(mod, "rm(\"/usr/bin/julia\")")
 end
 
+@testset "interpret — filesystem write, read, rm" begin
+  mod = Module(:test_fs)
+  testdir = mktempdir("/tmp")  # use /tmp directly (in allowed_dirs)
+  testfile = joinpath(testdir, "test.txt")
+
+  # Write to allowed path
+  interpret(mod, """write("$testfile", "hello from repl")""")
+  @test isfile(testfile)
+  @test read(testfile, String) == "hello from repl"
+
+  # Read it back via the interpreter
+  result = interpret(mod, """read("$testfile", String)""")
+  @test result == "hello from repl"
+
+  # Remove it
+  interpret(mod, """rm("$testfile")""")
+  @test !isfile(testfile)
+
+  # Clean up
+  rm(testdir; recursive=true, force=true)
+end
+
 @testset "interpret — allows safe operations" begin
   mod = Module(:test_safe)
   # Reading files is allowed (no validate dispatch for read)
