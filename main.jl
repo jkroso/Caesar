@@ -13,141 +13,15 @@
 @use "./safety"...
 @use "./repl" interpret
 
+# ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Prosca")
-
-if !isfile(HOME * "config.yaml")
-  YAML.write_file(HOME * "config.yaml", Dict(
-    "llm" => "qwen3.5:27b",
-    "github_token" => "",
-    "allowed_dirs" => [HOME, expanduser("~/projects")],
-    "allowed_commands" => ["ls *", "cat *", "head *", "tail *", "grep *", "find *", "git *", "julia *", "pwd", "echo *", "wc *"],
-    "log_level" => "info",
-  ))
-end
-
-const CONFIG = YAML.load_file(string(HOME * "config.yaml"))
-
 const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn" => Logging.Warn, "error" => Logging.Error)
-Logging.global_logger(Logging.ConsoleLogger(stderr, get(LOG_LEVELS, get(CONFIG, "log_level", "warn"), Logging.Warn)))
 
-const MEMORY_DB_PATH = HOME * "memories/memories.db"
-MEMORY_DB_PATH.exists || mkpath(MEMORY_DB_PATH.parent)
-const DB = SQLite.DB(string(MEMORY_DB_PATH))
-
-SQLite.execute(DB, """
-  CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY,
-    timestamp TEXT,
-    role TEXT,
-    content TEXT,
-    embedding TEXT,
-    metadata TEXT DEFAULT '{}',
-    conversation_id TEXT DEFAULT NULL
-  );
-""")
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timestamp);")
-# Migrate: add conversation_id column if missing (safe on new DBs too)
-try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id);")
-# Migrate: add agent_id column if missing
-try SQLite.execute(DB, "ALTER TABLE memories ADD COLUMN agent_id TEXT DEFAULT 'prosca'") catch end
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_agent_id ON memories(agent_id);")
-
-SQLite.execute(DB, """
-  CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    path TEXT NOT NULL UNIQUE,
-    is_default INTEGER DEFAULT 0,
-    paused INTEGER DEFAULT 0,
-    model TEXT,
-    idle_check_mins INTEGER DEFAULT 30,
-    tokens_used INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0.0,
-    last_checked_at TEXT,
-    created_at TEXT,
-    metadata TEXT DEFAULT '{}'
-  );
-""")
-
-# Migration: add paused column to existing projects tables
-try SQLite.execute(DB, "ALTER TABLE projects ADD COLUMN paused INTEGER DEFAULT 0") catch end
-
-SQLite.execute(DB, """
-  CREATE TABLE IF NOT EXISTS routines (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects(id),
-    name TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    model TEXT,
-    schedule_natural TEXT,
-    schedule_cron TEXT,
-    enabled INTEGER DEFAULT 1,
-    tokens_used INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0.0,
-    last_run_at TEXT,
-    next_run_at TEXT,
-    created_at TEXT,
-    metadata TEXT DEFAULT '{}'
-  );
-""")
-
-SQLite.execute(DB, """
-  CREATE TABLE IF NOT EXISTS routine_runs (
-    id INTEGER PRIMARY KEY,
-    routine_id TEXT REFERENCES routines(id),
-    project_id TEXT REFERENCES projects(id),
-    started_at TEXT,
-    finished_at TEXT,
-    result TEXT,
-    tokens_used INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0.0,
-    notable INTEGER DEFAULT 0,
-    seen INTEGER DEFAULT 0
-  );
-""")
-
-SQLite.execute(DB, """
-  CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL DEFAULT 'prosca',
-    title TEXT NOT NULL DEFAULT 'New chat',
-    handed_off_to TEXT,
-    handed_off_from TEXT,
-    created_at TEXT,
-    updated_at TEXT
-  );
-""")
-
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(project_id);")
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id);")
-SQLite.execute(DB, "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routine_runs(notable, seen);")
-
-let rows = SQLite.DBInterface.execute(DB, "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> SQLite.rowtable
-  if rows[1].c == 0
-    personal_path = joinpath(string(HOME), "personal") * "/"
-    mkpath(personal_path)
-    if !isfile(joinpath(personal_path, "Project.md"))
-      write(joinpath(personal_path, "Project.md"), """
-      # Personal Project
-
-      This is your default project for general routines and tasks.
-
-      ## Goals
-
-      - Add your personal goals here
-
-      ## Routines
-
-      - Routines you create without a specific project will be added here
-      """)
-    end
-    SQLite.execute(DB, """
-      INSERT INTO projects (id, name, path, is_default, created_at)
-      VALUES (?, 'Personal', ?, 1, datetime('now'))
-    """, (string(UUIDs.uuid4()), personal_path))
-  end
-end
+# ── Mutable state initialized at runtime ─────────────────────────────
+const CONFIG = Dict{String,Any}()
+const DB = Ref{SQLite.DB}()
+const LLM_SCHEMA = Ref{Any}()
+const EMBED_MODEL = Ref{String}("qwen3-embedding:8b")
 
 # Agent → Interface events
 struct AgentMessage
@@ -179,11 +53,17 @@ end
 
 struct ToolApprovalRetracted
   id::UInt64
-  reason::String  # e.g. "routed_to_telegram", "routed_to_gui"
+  reason::String
 end
+
+# ── LLM Schema Detection ────────────────────────────────────────────
 
 function _detect_schema()
   model = get(CONFIG, "llm", "")
+  _detect_schema_for(model)
+end
+
+function _detect_schema_for(model::String)
   if startswith(model, "ollama:")
     PromptingTools.OllamaSchema()
   elseif startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
@@ -208,15 +88,13 @@ function _detect_schema()
     PromptingTools.OllamaSchema()
   end
 end
-const LLM_SCHEMA = Ref{Any}(_detect_schema())
 
-# ============= EMBEDDINGS =============
+# ── Embeddings ───────────────────────────────────────────────────────
 const EMBED_SCHEMA = PromptingTools.OllamaSchema()
-const EMBED_MODEL = get(CONFIG, "embed_model", "qwen3-embedding:8b")
 
 function get_embedding(text::String)::Union{Vector{Float64}, Nothing}
   try
-    msg = PromptingTools.aiembed(EMBED_SCHEMA, text; model=EMBED_MODEL, copy=true)
+    msg = PromptingTools.aiembed(EMBED_SCHEMA, text; model=EMBED_MODEL[], copy=true)
     normalize(vec(msg.content))
   catch e
     @warn "Embedding failed: $e"
@@ -224,7 +102,7 @@ function get_embedding(text::String)::Union{Vector{Float64}, Nothing}
   end
 end
 
-# ============= EMBEDDINGS + RAGTOOLS MEMORY =============
+# ── Memory (RAGTools) ────────────────────────────────────────────────
 const MEMORY_INDEXES = Dict{Tuple{String, Union{String,Nothing}}, ChunkIndex}()
 
 function rebuild_memory_index(; agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
@@ -233,7 +111,7 @@ function rebuild_memory_index(; agent_id::String="prosca", conversation_id::Unio
   else
     "SELECT id, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL ORDER BY timestamp DESC", (agent_id,)
   end
-  rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
+  rows = map(SQLite.DBInterface.execute(DB[], query, params)) do row
     (id=row.id, content=row.content)
   end
 
@@ -253,7 +131,7 @@ end
 function log_memory(text::String; role::String="Agent", metadata=Dict(),
                     agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
   emb = get_embedding(text)
-  stmt = SQLite.Stmt(DB, """
+  stmt = SQLite.Stmt(DB[], """
     INSERT INTO memories (timestamp, role, content, embedding, metadata, agent_id, conversation_id)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   """)
@@ -287,7 +165,7 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50,
   else
     "SELECT id, role, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (agent_id, string(cutoff), batch_size)
   end
-  rows = map(SQLite.DBInterface.execute(DB, query, params)) do row
+  rows = map(SQLite.DBInterface.execute(DB[], query, params)) do row
     (id=row.id, role=row.role, content=row.content)
   end
 
@@ -300,7 +178,7 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50,
   ]).content
 
   ids = join([string(r.id) for r in rows], ",")
-  SQLite.execute(DB, "DELETE FROM memories WHERE id IN ($ids)")
+  SQLite.execute(DB[], "DELETE FROM memories WHERE id IN ($ids)")
 
   rebuild_memory_index(; agent_id, conversation_id)
   log_memory("Memory consolidation: $summary"; role="System", agent_id, conversation_id)
@@ -308,10 +186,7 @@ function prune_memories(;older_than_days::Int=30, batch_size::Int=50,
   "Pruned $(length(rows)) old memories into one summary."
 end
 
-
-# ============= TOOLS =============
-
-# Auto-discover tools from tools/ folder
+# ── Tools ────────────────────────────────────────────────────────────
 const TOOLS = Dict{String, Function}()
 const TOOL_SCHEMAS = String[]
 const TOOL_CONFIRM = Set{String}()
@@ -330,16 +205,13 @@ function load_tools!()
   end
 end
 
-load_tools!()
-
-# ============= COMMANDS =============
+# ── Commands ─────────────────────────────────────────────────────────
 const COMMANDS_DIR = HOME * "commands"
-COMMANDS_DIR.exists || mkpath(COMMANDS_DIR)
-
 const COMMANDS = Dict{String, Module}()
 
 function load_commands!()
   empty!(COMMANDS)
+  COMMANDS_DIR.exists || mkpath(COMMANDS_DIR)
   for file in COMMANDS_DIR.children
     file.extension == "jl" || continue
     mod = try
@@ -354,11 +226,8 @@ function load_commands!()
   end
 end
 
-load_commands!()
-
-# ============= SKILLS =============
+# ── Skills ───────────────────────────────────────────────────────────
 const SKILLS_DIR = HOME * "skills"
-SKILLS_DIR.exists || mkpath(SKILLS_DIR)
 
 struct Skill
   name::String
@@ -368,7 +237,6 @@ end
 
 function parse_skill(path::String)::Union{Skill, Nothing}
   text = read(path, String)
-  # Parse YAML frontmatter between --- delimiters
   m = match(r"^---\s*\n(.*?)\n---\s*\n(.*)"s, text)
   m === nothing && return nothing
   frontmatter = try
@@ -388,6 +256,7 @@ const SKILLS = Dict{String, Skill}()
 
 function load_skills!()
   empty!(SKILLS)
+  SKILLS_DIR.exists || mkpath(SKILLS_DIR)
   for file in SKILLS_DIR.children
     file.extension == "md" || continue
     skill = parse_skill(string(file))
@@ -397,85 +266,86 @@ function load_skills!()
   end
 end
 
-load_skills!()
-
-# agents.jl — Multi-agent system: struct, loading, creation, migration
+# ── Agents ───────────────────────────────────────────────────────────
 struct Agent
-    id::String
-    personality::String
-    instructions::String
-    skills::Dict{String, Skill}
-    path::FSPath
-    repl_module::Module
+  id::String
+  personality::String
+  instructions::String
+  skills::Dict{String, Skill}
+  path::FSPath
+  repl_module::Module
 end
 
 const AGENTS = Dict{String, Agent}()
-
-"""Load skills from an agent's skills/ directory."""
-function load_agent_skills(agent_path::FSPath)::Dict{String, Skill}
-    skills = Dict{String, Skill}()
-    skills_dir = agent_path * "skills"
-    isdir(skills_dir) || return skills
-    for file in skills_dir.children
-        file.extension == "md" || continue
-        skill = parse_skill(string(file))
-        skill === nothing && continue
-        skills[skill.name] = skill
-    end
-    skills
-end
-
 const AGENTS_DIR = HOME*"agents"
 
-"""Load a single agent from its directory."""
+function load_agent_skills(agent_path::FSPath)::Dict{String, Skill}
+  skills = Dict{String, Skill}()
+  skills_dir = agent_path * "skills"
+  isdir(skills_dir) || return skills
+  for file in skills_dir.children
+    file.extension == "md" || continue
+    skill = parse_skill(string(file))
+    skill === nothing && continue
+    skills[skill.name] = skill
+  end
+  skills
+end
+
 function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
-    id = agent_dir.name
-    soul_path = agent_dir*"soul.md"
-    instr_path = agent_dir*"instructions.md"
-    isfile(soul_path) && isfile(instr_path) || return nothing
-    Agent(
-        id,
-        read(soul_path, String),
-        read(instr_path, String),
-        load_agent_skills(agent_dir),
-        agent_dir,
-        Module(Symbol("agent_$id"))
-    )
+  id = agent_dir.name
+  soul_path = agent_dir*"soul.md"
+  instr_path = agent_dir*"instructions.md"
+  isfile(soul_path) && isfile(instr_path) || return nothing
+  Agent(id, read(soul_path, String), read(instr_path, String),
+        load_agent_skills(agent_dir), agent_dir, Module(Symbol("agent_$id")))
 end
 
-"""Scan ~/Prosca/agents/ and load all agents."""
 function load_agents!()
-    empty!(AGENTS)
-    isdir(AGENTS_DIR) || return
-    for entry in AGENTS_DIR.children
-        isdir(entry) || continue
-        agent = load_agent(entry)
-        agent === nothing && continue
-        AGENTS[agent.id] = agent
-        @info "Loaded agent: $(agent.id) ($(length(agent.skills)) local skills)"
-    end
+  empty!(AGENTS)
+  isdir(AGENTS_DIR) || return
+  for entry in AGENTS_DIR.children
+    isdir(entry) || continue
+    agent = load_agent(entry)
+    agent === nothing && continue
+    AGENTS[agent.id] = agent
+    @info "Loaded agent: $(agent.id) ($(length(agent.skills)) local skills)"
+  end
 end
 
-"""Create a new agent with LLM-generated soul and instructions."""
+function migrate_to_agents!()
+  isdir(AGENTS_DIR) && return
+  root_soul = HOME * "soul.md"
+  root_instr = HOME * "instructions.md"
+  (isfile(root_soul) && isfile(root_instr)) || return
+  prosca_dir = mkpath(AGENTS_DIR * "prosca")
+  cp(root_soul, prosca_dir * "soul.md")
+  cp(root_instr, prosca_dir * "instructions.md")
+  root_skills = HOME * "skills"
+  if isdir(root_skills)
+    prosca_skills = mkpath(prosca_dir * "skills")
+    for file in root_skills.children
+      file.extension == "md" || continue
+      cp(file, prosca_skills * file.name)
+    end
+  end
+  @info "Migrated root soul.md/instructions.md to agents/prosca/"
+end
+
 function create_agent!(name::String, description::String)::Union{Agent, Nothing}
   agent_dir = AGENTS_DIR * name
-  isdir(agent_dir) && return nothing  # already exists
-
+  isdir(agent_dir) && return nothing
   mkpath(agent_dir)
   mkpath(agent_dir * "skills")
-
-  # Generate soul.md and instructions.md via LLM
   soul_content, instr_content = try
     gen_msgs = [
-      PromptingTools.SystemMessage("""
-      You are creating a new AI agent persona. Generate two markdown files based on the description.
+      PromptingTools.SystemMessage("""You are creating a new AI agent persona. Generate two markdown files based on the description.
 
-      Reply in this exact format:
-      ===SOUL===
-      <soul.md content: personality, tone, values — 3-5 short paragraphs>
-      ===INSTRUCTIONS===
-      <instructions.md content: capabilities, constraints, how to approach tasks — bullet points>
-      """),
+Reply in this exact format:
+===SOUL===
+<soul.md content: personality, tone, values — 3-5 short paragraphs>
+===INSTRUCTIONS===
+<instructions.md content: capabilities, constraints, how to approach tasks — bullet points>"""),
       PromptingTools.UserMessage("Agent name: $name\nDescription: $description")
     ]
     result = call_llm(gen_msgs).content
@@ -489,16 +359,13 @@ function create_agent!(name::String, description::String)::Union{Agent, Nothing}
     @warn "LLM generation failed for agent $name, using template" exception=e
     "# $name\n\n$description", "# Instructions\n\n- $description"
   end
-
   write(agent_dir * "soul.md", soul_content)
   write(agent_dir * "instructions.md", instr_content)
-
   agent = load_agent(agent_dir)
   agent !== nothing && (AGENTS[name] = agent)
   agent
 end
 
-"""Delete an agent (prosca cannot be deleted)."""
 function delete_agent!(id::String)::Bool
   id == "prosca" && return false
   haskey(AGENTS, id) || return false
@@ -508,38 +375,35 @@ function delete_agent!(id::String)::Bool
   true
 end
 
-"""Update an agent's soul.md and/or instructions.md, reload from disk."""
 function update_agent!(id::String; soul::Union{String,Nothing}=nothing, instructions::Union{String,Nothing}=nothing)::Bool
   haskey(AGENTS, id) || return false
   agent = AGENTS[id]
   soul !== nothing && write(agent.path * "soul.md", soul)
   instructions !== nothing && write(agent.path * "instructions.md", instructions)
-  # Reload
   updated = load_agent(agent.path)
   updated !== nothing && (AGENTS[id] = updated)
   true
 end
 
-"""Get the default agent."""
-function default_agent()::Agent
-  get(AGENTS, "prosca", first(values(AGENTS)))
-end
+default_agent()::Agent = get(AGENTS, "prosca", first(values(AGENTS)))
 
-"""Merge agent-local skills over global skills. Local wins on name collision."""
 function merged_skills(agent::Agent)::Dict{String, Skill}
   merged = copy(SKILLS)
   merge!(merged, agent.skills)
   merged
 end
 
-load_agents!()
-
-# Build indexes for all agents on startup (global memories only)
-for agent_id in keys(AGENTS)
-  rebuild_memory_index(; agent_id)
+# ── Glob matching for allowed_commands ───────────────────────────────
+function _glob_match(str::String, pattern::String)::Bool
+  if !contains(pattern, '*')
+    return str == pattern
+  end
+  parts = split(pattern, '*')
+  length(parts) == 2 || return false
+  startswith(str, parts[1]) && endswith(str, parts[2])
 end
 
-# ============= AGENT =============
+# ── System Prompt ────────────────────────────────────────────────────
 function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=nothing)::String
   all_skills = merged_skills(agent)
   skill_list = if isempty(all_skills)
@@ -558,7 +422,6 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
     ""
   end
 
-  # Available agents for handoff
   other_agents = [a for a in values(AGENTS) if a.id != agent.id]
   handoff_section = if isempty(other_agents)
     ""
@@ -596,63 +459,38 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   """
 end
 
-# Session conversation history for continuity across run_agent calls
+# ── Session State ────────────────────────────────────────────────────
 const SESSION_HISTORY = PromptingTools.AbstractMessage[]
-# Tools the user has approved with "always" for this session
 const AUTO_ALLOWED_TOOLS = Set{String}()
 
-# TODO: streaming (streamcallback=stdout) doesn't pair well with JSON tool dispatch
-# in a ReAct loop — the raw JSON gets streamed before we can parse it. Revisit if
-# switching to a structured output / function-calling API.
 struct LlmResult
   content::String
   input_tokens::Int
   output_tokens::Int
 end
 
-function _detect_schema_for(model::String)
-  if startswith(model, "ollama:")
-    PromptingTools.OllamaSchema()
-  elseif startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
-    PromptingTools.OpenAISchema()
-  elseif startswith(model, "claude-")
-    PromptingTools.AnthropicSchema()
-  elseif startswith(model, "gemini-")
-    PromptingTools.GoogleSchema()
-  elseif startswith(model, "mistral-")
-    PromptingTools.MistralOpenAISchema()
-  elseif startswith(model, "deepseek-")
-    PromptingTools.DeepSeekOpenAISchema()
-  elseif startswith(model, "grok-")
-    PromptingTools.XAIOpenAISchema()
-  else
-    PromptingTools.OllamaSchema()
-  end
-end
-
 function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing)::LlmResult
   temperature = get(CONFIG, "temperature", 0.7)
   use_model = model !== nothing ? model : CONFIG["llm"]
   is_local = startswith(use_model, "ollama:")
-  # Strip provider prefix (e.g. "ollama:qwen3.5:35b" → "qwen3.5:35b")
   if is_local
     use_model = use_model[length("ollama:")+1:end]
   end
   default_timeout = is_local ? 300 : 60
   timeout = get(CONFIG, "llm_timeout", default_timeout)
   use_schema = schema !== nothing ? schema : LLM_SCHEMA[]
-  # If a custom model is provided without a schema, detect it
   if model !== nothing && schema === nothing
     use_schema = _detect_schema_for(model)
   end
   resp = PromptingTools.aigenerate(use_schema, messages;
     model=use_model, temperature,
     http_kwargs=(; retry_non_idempotent=false, retries=0, readtimeout=timeout))
-  # Extract token usage from response
   input_tokens = try get(resp.run_info, :prompt_tokens, 0) catch; 0 end
   output_tokens = try get(resp.run_info, :completion_tokens, 0) catch; 0 end
   LlmResult(resp.content, input_tokens, output_tokens)
 end
+
+# ── ReAct Agent Loop ─────────────────────────────────────────────────
 
 function run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent;
                    session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
@@ -671,11 +509,10 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
                     conversation_id::Union{String,Nothing}=nothing)
   log_memory("User: $user_input"; role="User", agent_id=agent.id, conversation_id)
 
-  # Check for /skill-name prefix
   active_skill = nothing
   if startswith(user_input, "/")
     parts = split(user_input, limit=2)
-    skill_name = parts[1][2:end]  # strip leading /
+    skill_name = parts[1][2:end]
     all_skills_init = merged_skills(agent)
     if haskey(all_skills_init, skill_name)
       active_skill = all_skills_init[skill_name]
@@ -684,16 +521,15 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     end
   end
 
-  memories = search_memories(user_input; agent_id=agent.id, conversation_id)  # now powered by RAGTools
+  memories = search_memories(user_input; agent_id=agent.id, conversation_id)
   messages = PromptingTools.AbstractMessage[PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))]
 
-  window = session_history[max(1, end-19):end]  # last 10 exchange pairs
+  window = session_history[max(1, end-19):end]
   append!(messages, window)
   push!(messages, PromptingTools.UserMessage("$memories\n\nTask: $user_input"))
 
   max_steps = get(CONFIG, "max_steps", 15)
   for step in 1:max_steps
-    # Periodic REPL scope reminder
     if step > 1 && step % 5 == 0
       user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
       if !isempty(user_names)
@@ -710,14 +546,11 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     end
     @debug "LLM response ($(length(response_text)) chars): $(response_text[1:min(200, end)])"
 
-    # Try to parse as JSON tool call — strip markdown fences and extract JSON
     json_str = strip(response_text)
-    # Strip ```json ... ``` wrapping that LLMs love to add
     m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, json_str)
     if m !== nothing
       json_str = strip(m.captures[1])
     end
-    # Find last line that looks like a JSON object
     if !startswith(json_str, "{")
       for line in reverse(split(json_str, '\n'))
         stripped = strip(line)
@@ -730,20 +563,18 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
 
     parsed = try
       result = JSON3.read(json_str)
-      result isa AbstractDict ? result : nothing  # only accept JSON objects
+      result isa AbstractDict ? result : nothing
     catch
       nothing
     end
 
     if parsed === nothing
-      # Check if it looks like it was TRYING to be JSON (malformed tool call)
       if contains(response_text, "\"tool\"") && contains(response_text, "\"args\"")
         push!(messages, PromptingTools.AIMessage(response_text))
         push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Remember to escape quotes inside strings with \\\\\". Try again."))
         @warn "Malformed JSON from LLM, asking to retry" response_text
         continue
       end
-      # LLM responded with plain text — treat as final answer
       put!(outbox, AgentMessage(response_text))
       log_memory("Agent: $response_text"; agent_id=agent.id, conversation_id)
       break
@@ -761,7 +592,6 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       if haskey(all_skills, sn)
         active_skill = all_skills[sn]
         @info "LLM activated skill: $sn"
-        # Rebuild system prompt with the skill and retry
         messages[1] = PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))
         push!(messages, PromptingTools.AIMessage(response_text))
         push!(messages, PromptingTools.UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
@@ -785,27 +615,23 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
         continue
       end
 
-      # Create handoff conversation in SQLite
       new_conv_id = string(UUIDs.uuid4())
       try
-        SQLite.execute(DB, """
+        SQLite.execute(DB[], """
           INSERT INTO conversations (id, agent_id, title, handed_off_from, created_at, updated_at)
           VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
         """, (new_conv_id, to_agent_id, "Handoff: $reason", conversation_id))
-
-        # Update current conversation
         if conversation_id !== nothing
-          SQLite.execute(DB, "UPDATE conversations SET handed_off_to=?, updated_at=datetime('now') WHERE id=?",
+          SQLite.execute(DB[], "UPDATE conversations SET handed_off_to=?, updated_at=datetime('now') WHERE id=?",
                          (new_conv_id, conversation_id))
         end
       catch e
         @warn "Failed to record handoff in DB: $e"
       end
 
-      # Emit handoff message
       put!(outbox, AgentMessage("Handing off to **$to_agent_id**: $reason"))
       log_memory("Handoff to $to_agent_id: $reason\nContext: $context_summary"; agent_id=agent.id, conversation_id)
-      break  # exits the ReAct loop, then AgentDone is emitted after the loop
+      break
     end
 
     if haskey(parsed, :eval)
@@ -832,7 +658,6 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       continue
     end
 
-    # Determine if confirmation is needed
     needs_confirm = tn in TOOL_CONFIRM && tn ∉ auto_allowed
 
     if needs_confirm
@@ -850,7 +675,6 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       end
     end
 
-    # Execute the tool
     result = try
       TOOLS[tn](parsed.args)
     catch e
@@ -866,13 +690,112 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
 
   put!(outbox, AgentDone())
 
-  # Save exchange to session history for continuity
   push!(session_history, PromptingTools.UserMessage(user_input))
-  # Find the last AIMessage (not a UserMessage like "Tool result: ...")
   for i in length(messages):-1:1
     if messages[i] isa PromptingTools.AIMessage
       push!(session_history, messages[i])
       break
     end
+  end
+end
+
+# ── Initialization (runs at runtime, not precompile) ─────────────────
+
+function __init__()
+  # Load config
+  if !isfile(HOME * "config.yaml")
+    YAML.write_file(HOME * "config.yaml", Dict(
+      "llm" => "qwen3.5:27b",
+      "github_token" => "",
+      "allowed_dirs" => [HOME, expanduser("~/projects")],
+      "allowed_commands" => ["ls *", "cat *", "head *", "tail *", "grep *", "find *", "git *", "julia *", "pwd", "echo *", "wc *"],
+      "log_level" => "info",
+    ))
+  end
+  merge!(CONFIG, YAML.load_file(string(HOME * "config.yaml")))
+  Logging.global_logger(Logging.ConsoleLogger(stderr, get(LOG_LEVELS, get(CONFIG, "log_level", "warn"), Logging.Warn)))
+
+  # Initialize DB
+  db_path = HOME * "memories/memories.db"
+  db_path.exists || mkpath(db_path.parent)
+  DB[] = SQLite.DB(string(db_path))
+
+  # Create tables
+  SQLite.execute(DB[], """
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY, timestamp TEXT, role TEXT, content TEXT,
+      embedding TEXT, metadata TEXT DEFAULT '{}', conversation_id TEXT DEFAULT NULL
+    )""")
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timestamp)")
+  try SQLite.execute(DB[], "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id)")
+  try SQLite.execute(DB[], "ALTER TABLE memories ADD COLUMN agent_id TEXT DEFAULT 'prosca'") catch end
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_agent_id ON memories(agent_id)")
+
+  SQLite.execute(DB[], """
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+      is_default INTEGER DEFAULT 0, paused INTEGER DEFAULT 0, model TEXT,
+      idle_check_mins INTEGER DEFAULT 30, tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0.0, last_checked_at TEXT, created_at TEXT, metadata TEXT DEFAULT '{}'
+    )""")
+  try SQLite.execute(DB[], "ALTER TABLE projects ADD COLUMN paused INTEGER DEFAULT 0") catch end
+
+  SQLite.execute(DB[], """
+    CREATE TABLE IF NOT EXISTS routines (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+      name TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT, schedule_natural TEXT,
+      schedule_cron TEXT, enabled INTEGER DEFAULT 1, tokens_used INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0.0, last_run_at TEXT, next_run_at TEXT, created_at TEXT, metadata TEXT DEFAULT '{}'
+    )""")
+
+  SQLite.execute(DB[], """
+    CREATE TABLE IF NOT EXISTS routine_runs (
+      id INTEGER PRIMARY KEY, routine_id TEXT REFERENCES routines(id),
+      project_id TEXT REFERENCES projects(id), started_at TEXT, finished_at TEXT,
+      result TEXT, tokens_used INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0.0,
+      notable INTEGER DEFAULT 0, seen INTEGER DEFAULT 0
+    )""")
+
+  SQLite.execute(DB[], """
+    CREATE TABLE IF NOT EXISTS conversations (
+      id TEXT PRIMARY KEY, agent_id TEXT NOT NULL DEFAULT 'prosca',
+      title TEXT NOT NULL DEFAULT 'New chat', handed_off_to TEXT,
+      handed_off_from TEXT, created_at TEXT, updated_at TEXT
+    )""")
+
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(project_id)")
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id)")
+  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_routine_runs_notable ON routine_runs(notable, seen)")
+
+  # Default project
+  let rows = SQLite.DBInterface.execute(DB[], "SELECT COUNT(*) as c FROM projects WHERE is_default=1") |> SQLite.rowtable
+    if rows[1].c == 0
+      personal_path = joinpath(string(HOME), "personal") * "/"
+      mkpath(personal_path)
+      if !isfile(joinpath(personal_path, "Project.md"))
+        write(joinpath(personal_path, "Project.md"), "# Personal Project\n\nThis is your default project.\n\n## Goals\n\n- Add your goals here\n")
+      end
+      SQLite.execute(DB[], """
+        INSERT INTO projects (id, name, path, is_default, created_at)
+        VALUES (?, 'Personal', ?, 1, datetime('now'))
+      """, (string(UUIDs.uuid4()), personal_path))
+    end
+  end
+
+  # Initialize LLM schema
+  LLM_SCHEMA[] = _detect_schema()
+  EMBED_MODEL[] = get(CONFIG, "embed_model", "qwen3-embedding:8b")
+
+  # Load everything
+  load_tools!()
+  load_commands!()
+  load_skills!()
+  migrate_to_agents!()
+  load_agents!()
+
+  # Build memory indexes
+  for agent_id in keys(AGENTS)
+    rebuild_memory_index(; agent_id)
   end
 end

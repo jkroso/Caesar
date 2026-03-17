@@ -271,7 +271,7 @@ end
 # ── Project CRUD ─────────────────────────────────────────────────────
 
 function handle_projects_list()
-  rows = SQLite.DBInterface.execute(DB, """
+  rows = SQLite.DBInterface.execute(DB[], """
     SELECT p.*, (SELECT COUNT(*) FROM routines WHERE project_id=p.id) as routine_count
     FROM projects p ORDER BY is_default DESC, name ASC
   """) |> SQLite.rowtable
@@ -303,7 +303,7 @@ function handle_project_create(msg)
   end
 
   id = string(UUIDs.uuid4())
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     INSERT INTO projects (id, name, path, model, idle_check_mins, created_at)
     VALUES (?, ?, ?, ?, ?, datetime('now'))
   """, (id, name, path, model, idle_mins))
@@ -341,20 +341,20 @@ function handle_project_update(msg)
   end
   isempty(sets) && return
   push!(vals, id)
-  SQLite.execute(DB, "UPDATE projects SET $(join(sets, ", ")) WHERE id=?", vals)
+  SQLite.execute(DB[], "UPDATE projects SET $(join(sets, ", ")) WHERE id=?", vals)
   handle_projects_list()
 end
 
 function handle_project_delete(msg)
   id = string(get(msg, :id, ""))
-  rows = SQLite.DBInterface.execute(DB, "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
+  rows = SQLite.DBInterface.execute(DB[], "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
   if length(rows) > 0 && rows[1].is_default == 1
     emit(Dict("type" => "error", "text" => "Cannot delete the default project"))
     return
   end
-  SQLite.execute(DB, "DELETE FROM routine_runs WHERE project_id=?", (id,))
-  SQLite.execute(DB, "DELETE FROM routines WHERE project_id=?", (id,))
-  SQLite.execute(DB, "DELETE FROM projects WHERE id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM routine_runs WHERE project_id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM routines WHERE project_id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM projects WHERE id=?", (id,))
   handle_projects_list()
 end
 
@@ -363,13 +363,13 @@ end
 function handle_routines_list(msg)
   project_id = let v = get(msg, :project_id, nothing); v === nothing ? nothing : string(v) end
   query = if project_id !== nothing
-    SQLite.DBInterface.execute(DB, """
+    SQLite.DBInterface.execute(DB[], """
       SELECT r.*, p.name as project_name FROM routines r
       JOIN projects p ON r.project_id = p.id
       WHERE r.project_id=? ORDER BY r.created_at
     """, (project_id,))
   else
-    SQLite.DBInterface.execute(DB, """
+    SQLite.DBInterface.execute(DB[], """
       SELECT r.*, p.name as project_name FROM routines r
       JOIN projects p ON r.project_id = p.id
       ORDER BY p.is_default DESC, p.name, r.created_at
@@ -455,7 +455,7 @@ NAME: <short name>"""
   end
 
   id = string(UUIDs.uuid4())
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     INSERT INTO routines (id, project_id, name, prompt, model, schedule_natural, schedule_cron, next_run_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   """, (id, project_id, name, prompt, model, schedule_natural, schedule_cron, next_run))
@@ -496,14 +496,14 @@ function handle_routine_update(msg)
 
   isempty(sets) && return
   push!(vals, id)
-  SQLite.execute(DB, "UPDATE routines SET $(join(sets, ", ")) WHERE id=?", vals)
+  SQLite.execute(DB[], "UPDATE routines SET $(join(sets, ", ")) WHERE id=?", vals)
   handle_routines_list(msg)
 end
 
 function handle_routine_delete(msg)
   id = string(get(msg, :id, ""))
-  SQLite.execute(DB, "DELETE FROM routine_runs WHERE routine_id=?", (id,))
-  SQLite.execute(DB, "DELETE FROM routines WHERE id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM routine_runs WHERE routine_id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM routines WHERE id=?", (id,))
   handle_routines_list(msg)
 end
 
@@ -517,7 +517,7 @@ function handle_routine_runs_list(msg)
   unseen_only && (push!(conditions, "notable=1 AND seen=0"))
 
   where = isempty(conditions) ? "" : "WHERE " * join(conditions, " AND ")
-  rows = SQLite.DBInterface.execute(DB,
+  rows = SQLite.DBInterface.execute(DB[],
     "SELECT * FROM routine_runs $where ORDER BY started_at DESC LIMIT 100", params) |> SQLite.rowtable
 
   data = [Dict(
@@ -533,9 +533,9 @@ end
 function handle_routine_runs_mark_seen(msg)
   ids = get(msg, :ids, [])
   for id in ids
-    SQLite.execute(DB, "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
+    SQLite.execute(DB[], "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
   end
-  count = unseen_notable_count(DB)
+  count = unseen_notable_count(DB[])
   emit(Dict("type" => "unseen_count", "count" => count))
 end
 
@@ -586,7 +586,7 @@ end
 # ── Conversation CRUD ────────────────────────────────────────────────
 
 function handle_conversations_list()
-  rows = SQLite.DBInterface.execute(DB, """
+  rows = SQLite.DBInterface.execute(DB[], """
     SELECT * FROM conversations ORDER BY updated_at DESC
   """) |> SQLite.rowtable
   data = [Dict(
@@ -602,7 +602,7 @@ function handle_conversation_create(msg)
   agent_id = string(get(msg, :agent_id, "prosca"))
   haskey(AGENTS, agent_id) || (emit(Dict("type" => "error", "text" => "Unknown agent '$agent_id'")); return)
   id = string(UUIDs.uuid4())
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     INSERT INTO conversations (id, agent_id, title, created_at, updated_at)
     VALUES (?, ?, 'New chat', datetime('now'), datetime('now'))
   """, (id, agent_id))
@@ -611,7 +611,7 @@ end
 
 function handle_conversation_delete(msg)
   id = string(get(msg, :id, ""))
-  SQLite.execute(DB, "DELETE FROM conversations WHERE id=?", (id,))
+  SQLite.execute(DB[], "DELETE FROM conversations WHERE id=?", (id,))
   delete!(GUI_CONVERSATIONS, id)
   handle_conversations_list()
 end
@@ -619,7 +619,7 @@ end
 function handle_conversation_update_title(msg)
   id = string(get(msg, :id, ""))
   title = string(get(msg, :title, ""))
-  SQLite.execute(DB, "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
+  SQLite.execute(DB[], "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
   handle_conversations_list()
 end
 
@@ -641,7 +641,7 @@ function _scheduler_tick!()
   now_utc = now(Dates.UTC)
 
   # 1. Run due routines
-  due = SQLite.DBInterface.execute(DB, """
+  due = SQLite.DBInterface.execute(DB[], """
     SELECT r.*, p.path as project_path, p.model as project_model
     FROM routines r JOIN projects p ON r.project_id = p.id
     WHERE r.enabled=1 AND p.paused=0 AND r.next_run_at IS NOT NULL AND r.next_run_at <= ?
@@ -653,7 +653,7 @@ function _scheduler_tick!()
 
   # 2. Idle project check-ins
   idle_secs = Dates.value(now_utc - last_user_activity_at[]) / 1000
-  projects = SQLite.DBInterface.execute(DB, "SELECT * FROM projects WHERE paused=0") |> SQLite.rowtable
+  projects = SQLite.DBInterface.execute(DB[], "SELECT * FROM projects WHERE paused=0") |> SQLite.rowtable
 
   for proj in projects
     idle_mins = something(proj.idle_check_mins, 30)
@@ -668,7 +668,7 @@ function _scheduler_tick!()
 end
 
 function _run_routine(routine, now_utc::DateTime)
-  model = resolve_model(DB, routine.model, string(routine.project_id), CONFIG["llm"])
+  model = resolve_model(DB[], routine.model, string(routine.project_id), CONFIG["llm"])
   project_md_path = joinpath(string(routine.project_path), "Project.md")
   context = isfile(project_md_path) ? read(project_md_path, String) : ""
 
@@ -701,13 +701,13 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
   finished_at = string(now(Dates.UTC))
 
   # Store run
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     INSERT INTO routine_runs (routine_id, project_id, started_at, finished_at, result, tokens_used, cost_usd, notable)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   """, (routine.id, routine.project_id, started_at, finished_at, clean_result, total_tokens, cost, notable))
 
   # Update routine counters
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     UPDATE routines SET last_run_at=?, tokens_used=tokens_used+?, cost_usd=cost_usd+?
     WHERE id=?
   """, (finished_at, total_tokens, cost, routine.id))
@@ -715,12 +715,12 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
   # Compute next run
   if routine.schedule_cron !== missing && routine.schedule_cron !== nothing
     next_at = next_cron_time_utc(string(routine.schedule_cron), now_utc)
-    SQLite.execute(DB, "UPDATE routines SET next_run_at=? WHERE id=?",
+    SQLite.execute(DB[], "UPDATE routines SET next_run_at=? WHERE id=?",
                    (string(next_at), routine.id))
   end
 
   # Update project counters
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     UPDATE projects SET tokens_used=tokens_used+?, cost_usd=cost_usd+?
     WHERE id=?
   """, (total_tokens, cost, routine.project_id))
@@ -731,7 +731,7 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
         project_id=routine.project_id,
         routine_id=routine.id,
         extra_gui_emit=() -> begin
-            count = unseen_notable_count(DB)
+            count = unseen_notable_count(DB[])
             emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
@@ -775,13 +775,13 @@ Review this project and determine if there's anything you can do to help move it
   finished_at = string(now(Dates.UTC))
 
   # Store as routine_run with NULL routine_id
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     INSERT INTO routine_runs (routine_id, project_id, started_at, finished_at, result, tokens_used, cost_usd, notable)
     VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)
   """, (project.id, started_at, finished_at, clean_result, total_tokens, cost, notable))
 
   # Update project
-  SQLite.execute(DB, """
+  SQLite.execute(DB[], """
     UPDATE projects SET last_checked_at=?, tokens_used=tokens_used+?, cost_usd=cost_usd+?
     WHERE id=?
   """, (finished_at, total_tokens, cost, project.id))
@@ -790,7 +790,7 @@ Review this project and determine if there's anything you can do to help move it
     route_notification(ROUTER, clean_result;
         project_id=project.id,
         extra_gui_emit=() -> begin
-            count = unseen_notable_count(DB)
+            count = unseen_notable_count(DB[])
             emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
@@ -894,7 +894,7 @@ let gw_config = get(CONFIG, "gateway", nothing)
             chat_id = get(tg_config, "chat_id", 0)
             owner_id = get(tg_config, "owner_id", 0)
             if !isempty(bot_token) && chat_id != 0 && owner_id != 0
-                adapter = TelegramAdapter(; bot_token, chat_id=Int64(chat_id), owner_id=Int64(owner_id), db=DB)
+                adapter = TelegramAdapter(; bot_token, chat_id=Int64(chat_id), owner_id=Int64(owner_id), db=DB[])
                 register_adapter!(ROUTER, adapter)
                 try
                     start!(adapter, ROUTER)
@@ -915,7 +915,7 @@ const APPROVAL_CHECK_TIMER = Timer(t -> begin
 end, 60; interval=60)
 
 # Emit initial unseen count
-emit(Dict("type" => "unseen_count", "count" => unseen_notable_count(DB)))
+emit(Dict("type" => "unseen_count", "count" => unseen_notable_count(DB[])))
 
 # Signal ready
 emit(Dict("type" => "ready"))
