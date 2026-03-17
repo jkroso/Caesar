@@ -4,6 +4,7 @@
 # and validating them via the safety dispatch system before allowing execution.
 
 using JuliaInterpreter
+using JSON3
 import JuliaInterpreter: step_expr!, pc_expr, Frame, SSAValue, lookup
 
 const _INTERP = JuliaInterpreter.RecursiveInterpreter()
@@ -76,8 +77,8 @@ function interpret(mod::Module, code::String;
   last_result = nothing
 
   for stmt in stmts
-    # Wrap non-Expr atoms (e.g. literal numbers) so Frame can handle them
-    expr = stmt isa Expr ? stmt : :($stmt)
+    # Wrap non-Expr atoms (e.g. bare symbols, literals) so Frame can handle them
+    expr = stmt isa Expr ? stmt : Expr(:block, stmt)
 
     frame = try
       Frame(mod, expr)
