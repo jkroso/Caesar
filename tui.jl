@@ -2,24 +2,22 @@
 # Prosca TUI — Tachikoma-based terminal interface for the Prosca agent
 # ═══════════════════════════════════════════════════════════════════════
 
-@use "./main"...
-
-@use Tachikoma...
+@use "." ToolCallRequest HOME CONFIG AGENTS default_agent
 @use Tachikoma: view, update!, should_quit
+@use Tachikoma...
 
 # ── Model ─────────────────────────────────────────────────────────────
 
 @kwdef mutable struct ProscaModel <: Model
   outbox::Channel       = Channel(32)
   inbox::Channel        = Channel(32)
-  active_tab::Int       = 1               # 1=Chat, 2=Help, 3=Skills, 4=MCP
+  active_tab::Int       = 1               # 1=Chat, 2=Help, 3=Skills, 4=Agents
   input::TextInput      = TextInput(; label="You: ", focused=true, tick=0)
-  messages::Vector{Vector{Span}} = Vector{Span}[]  # chat history as styled lines
+  messages::Vector{Vector{Span}} = Vector{Span}[]
   scroll::ScrollPane    = ScrollPane(Vector{Span}[]; following=true, word_wrap=true)
   pending_tool::Union{Nothing, ToolCallRequest} = nothing
   agent_busy::Bool      = false
   quit::Bool            = false
-  # Autocomplete state
   completions::Vector{String} = String[]
   completion_idx::Int   = 0
 end
@@ -28,7 +26,7 @@ should_quit(m::ProscaModel) = m.quit
 
 # ── Tab labels ────────────────────────────────────────────────────────
 
-const TAB_LABELS = Tachikoma.TabLabel["Chat", "Help", "Skills", "MCP"]
+const TAB_LABELS = Tachikoma.TabLabel["Chat", "Help", "Skills", "Agents"]
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -77,7 +75,8 @@ function submit_input!(m::ProscaModel)
 
   push_chat!(m, "You: ", tstyle(:accent, bold=true), input_text, tstyle(:text))
   m.agent_busy = true
-  @async run_agent(input_text, m.outbox, m.inbox)
+  agent = default_agent()
+  @async run_agent(input_text, m.outbox, m.inbox, agent)
 end
 
 function handle_tool_approval!(m::ProscaModel, decision::Symbol)
@@ -94,7 +93,6 @@ end
 function gather_completions(prefix::String)::Vector{String}
   results = String[]
   if startswith(prefix, ";model ")
-    # Model name completion
     partial = strip(prefix[8:end])
     model_mod = get(COMMANDS, "model", nothing)
     if model_mod !== nothing && isdefined(model_mod, :PROVIDERS)
@@ -105,22 +103,12 @@ function gather_completions(prefix::String)::Vector{String}
       end
     end
   elseif startswith(prefix, ";") || startswith(prefix, "/")
-    # Show both commands and skills for either prefix
     partial = prefix[2:end]
     for name in keys(COMMANDS)
       startswith(name, partial) && push!(results, ";" * name)
     end
     for name in keys(SKILLS)
       startswith(name, partial) && push!(results, "/" * name)
-    end
-  else
-    # MCP tool completion (server.tool format)
-    for (sname, server) in MCP_SERVERS
-      server.connected || continue
-      for t in server.tools
-        full = "$sname.$(t.name)"
-        startswith(full, prefix) && push!(results, full)
-      end
     end
   end
   sort!(results)
@@ -148,7 +136,6 @@ function handle_tab!(m::ProscaModel)
   if isempty(m.completions)
     refresh_completions!(m)
   else
-    # Cycle forward
     m.completion_idx = mod1(m.completion_idx + 1, length(m.completions))
   end
 end
@@ -171,7 +158,7 @@ function drain_agent_events!(m::ProscaModel)
       m.pending_tool = event
       push_chat!(m, "  [y]Allow [n]Deny [a]Always", tstyle(:accent))
     elseif event isa ToolResult
-      # Tool results are shown in the agent's final answer; skip display here
+      # Tool results are shown in the agent's final answer
     elseif event isa AgentDone
       m.agent_busy = false
     end
@@ -181,18 +168,15 @@ end
 # ── Event handling ────────────────────────────────────────────────────
 
 function update!(m::ProscaModel, e::KeyEvent)
-  # Quit: Ctrl+Q (byte 0x11 -> char 'q')
   if e.key == :ctrl && e.char == 'q'
     m.quit = true
     return
   end
-  # Also handle Ctrl+C as quit
   if e.key == :ctrl_c
     m.quit = true
     return
   end
 
-  # Tab switching: Ctrl+N (next) / Ctrl+P (prev)
   if e.key == :ctrl && e.char == 'n'
     m.active_tab = mod1(m.active_tab + 1, 4)
     return
@@ -202,7 +186,6 @@ function update!(m::ProscaModel, e::KeyEvent)
     return
   end
 
-  # Tool approval when pending
   if m.pending_tool !== nothing
     if e.key == :char && e.char == 'y'
       handle_tool_approval!(m, :allow)
@@ -216,22 +199,15 @@ function update!(m::ProscaModel, e::KeyEvent)
     end
   end
 
-  # Chat tab: input handling
   if m.active_tab == 1
-    # Tab/Shift+Tab: cycle completions (or trigger if none)
     if e.key == :tab
-      if !isempty(m.completions)
-        handle_tab!(m)
-      else
-        handle_tab!(m)
-      end
+      handle_tab!(m)
       return
     end
     if e.key == :backtab
       handle_backtab!(m)
       return
     end
-    # Arrow keys: navigate completions when popup is open
     if !isempty(m.completions)
       if e.key == :down
         m.completion_idx = mod1(m.completion_idx + 1, length(m.completions))
@@ -242,12 +218,10 @@ function update!(m::ProscaModel, e::KeyEvent)
         return
       end
     end
-    # Escape: dismiss completions
     if e.key == :escape && !isempty(m.completions)
       dismiss_completions!(m)
       return
     end
-    # Enter: accept completion if popup is open, otherwise submit
     if e.key == :enter
       if !isempty(m.completions) && m.completion_idx > 0
         accept_completion!(m)
@@ -256,12 +230,10 @@ function update!(m::ProscaModel, e::KeyEvent)
       submit_input!(m)
       return
     end
-    # Scroll: PageUp/PageDown
     if e.key == :pageup || e.key == :pagedown
       handle_key!(m.scroll, e)
       return
     end
-    # Forward to text input, then refresh completions based on new text
     handle_key!(m.input, e)
     current = String(strip(text(m.input)))
     if !isempty(current) && (startswith(current, ";") || startswith(current, "/"))
@@ -272,9 +244,7 @@ function update!(m::ProscaModel, e::KeyEvent)
     return
   end
 
-  # Other tabs: scroll with arrows
   if m.active_tab in (2, 3, 4)
-    # No specific handling needed for static tabs
     return
   end
 end
@@ -282,23 +252,19 @@ end
 # ── View rendering ────────────────────────────────────────────────────
 
 function view(m::ProscaModel, f::Frame)
-  # Drain agent events each frame
   drain_agent_events!(m)
 
   buf = f.buffer
   area = f.area
 
-  # Layout: tab bar (1) | content (fill) | input (3 for label+input+border) | status (1)
   layout = Layout(Vertical, Constraint[Fixed(1), Fill(), Fixed(3), Fixed(1)])
   rects = split_layout(layout, area)
 
   tab_rect, content_rect, input_rect, status_rect = rects[1], rects[2], rects[3], rects[4]
 
-  # ── Tab bar ──
   tabs = TabBar(TAB_LABELS; active=m.active_tab)
   render(tabs, tab_rect, buf)
 
-  # ── Content area ──
   if m.active_tab == 1
     render_chat!(m, content_rect, buf)
   elseif m.active_tab == 2
@@ -306,23 +272,22 @@ function view(m::ProscaModel, f::Frame)
   elseif m.active_tab == 3
     render_skills!(content_rect, buf)
   elseif m.active_tab == 4
-    render_mcp!(content_rect, buf)
+    render_agents!(content_rect, buf)
   end
 
-  # ── Completion popup (rendered over bottom of content area) ──
+  # Completion popup
   if !isempty(m.completions) && m.active_tab == 1
     n = length(m.completions)
     max_show = min(n, 8)
     max_w = maximum(textwidth, m.completions) + 4
     popup_w = min(max_w, content_rect.width - 2)
-    popup_h = max_show + 2  # +2 for border
+    popup_h = max_show + 2
     popup_x = content_rect.x + 1
     popup_y = max(content_rect.y, bottom(content_rect) - popup_h + 1)
     popup_rect = Rect(popup_x, popup_y, popup_w, popup_h)
     popup_block = Block(title="Tab:next Esc:close", border_style=tstyle(:accent),
                         title_style=tstyle(:text_dim))
     popup_inner = render(popup_block, popup_rect, buf)
-    # Scroll window around selected item
     offset = max(0, m.completion_idx - max_show)
     for i in 1:max_show
       idx = offset + i
@@ -331,7 +296,6 @@ function view(m::ProscaModel, f::Frame)
       y > bottom(popup_inner) && break
       is_sel = idx == m.completion_idx
       s = is_sel ? Style(; fg=Color256(0), bg=tstyle(:accent).fg, bold=true) : tstyle(:text_dim)
-      # Clear the line first
       for x in popup_inner.x:right(popup_inner)
         set_char!(buf, x, y, ' ', s)
       end
@@ -340,13 +304,11 @@ function view(m::ProscaModel, f::Frame)
     end
   end
 
-  # ── Input area ──
   input_block = Block(title="Input", border_style=tstyle(:border),
                       title_style=tstyle(:accent, bold=true))
   inner = render(input_block, input_rect, buf)
   render(m.input, inner, buf)
 
-  # ── Status bar ──
   status_left = Span[]
   if m.agent_busy
     push!(status_left, Span(" Working... ", tstyle(:accent, bold=true)))
@@ -369,7 +331,6 @@ end
 # ── Tab renderers ─────────────────────────────────────────────────────
 
 function render_chat!(m::ProscaModel, rect::Rect, buf::Buffer)
-  # Use the shared ScrollPane which tracks messages
   m.scroll.block = Block(title="Chat", border_style=tstyle(:border),
                          title_style=tstyle(:primary, bold=true))
   render(m.scroll, rect, buf)
@@ -382,7 +343,7 @@ function render_help!(rect::Rect, buf::Buffer)
     "  Ctrl+N      Next tab",
     "  Ctrl+P      Previous tab",
     "  Ctrl+Q      Quit",
-    "  Tab         Autocomplete (;commands, /skills, tools)",
+    "  Tab         Autocomplete (;commands, /skills)",
     "  Enter       Send message",
     "  PageUp/Dn   Scroll chat",
     "",
@@ -394,7 +355,6 @@ function render_help!(rect::Rect, buf::Buffer)
     "Commands (prefix with ;):",
   ]
 
-  # Add loaded commands
   for (name, mod) in COMMANDS
     desc = hasproperty(mod, :description) ? mod.description : ""
     push!(help_lines, "  ;$name  $desc")
@@ -427,27 +387,22 @@ function render_skills!(rect::Rect, buf::Buffer)
   render(p, rect, buf)
 end
 
-function render_mcp!(rect::Rect, buf::Buffer)
-  lines = String["MCP Servers", ""]
-  if isempty(MCP_SERVERS)
-    push!(lines, "  No MCP servers configured.")
-    push!(lines, "")
-    push!(lines, "  Add servers to: ~/Prosca/mcp_servers.json")
+function render_agents!(rect::Rect, buf::Buffer)
+  if isempty(AGENTS)
+    lines = ["No agents loaded.", "", "Create agents via the GUI or agents/ directory."]
   else
-    for (name, server) in MCP_SERVERS
-      status = server.connected ? "connected" : "disconnected"
-      runtime_tag = server.is_runtime ? " [runtime]" : ""
-      push!(lines, "  $(name)$(runtime_tag) — $(status)")
-      push!(lines, "    $(server.url)")
-      push!(lines, "    $(length(server.tools)) tools")
-      for t in server.tools
-        push!(lines, "      $(t.name): $(t.description)")
-      end
+    lines = String["Loaded Agents:", ""]
+    for (id, agent) in AGENTS
+      first_line = split(agent.personality, '\n')[1]
+      push!(lines, "  $id")
+      push!(lines, "    $first_line")
+      n_skills = length(agent.skills)
+      n_skills > 0 && push!(lines, "    $n_skills local skill$(n_skills > 1 ? "s" : "")")
       push!(lines, "")
     end
   end
   p = Paragraph(join(lines, "\n");
-                block=Block(title="MCP", border_style=tstyle(:border),
+                block=Block(title="Agents", border_style=tstyle(:border),
                             title_style=tstyle(:primary, bold=true)),
                 wrap=word_wrap)
   render(p, rect, buf)
@@ -456,17 +411,10 @@ end
 # ── Launch ────────────────────────────────────────────────────────────
 
 let model = ProscaModel()
-  # Show welcome message
   push_chat!(model, "Prosca started", tstyle(:success, bold=true))
   push_chat!(model, "Brain: $HOME", tstyle(:text_dim))
   push_chat!(model, "Model: $(CONFIG["llm"])", tstyle(:text_dim))
-  # Show MCP server status
-  rt = runtime_server()
-  if rt !== nothing
-    push_chat!(model, "Runtime: $(rt.name) ($(length(rt.tools)) tools)", tstyle(:text_dim))
-  else
-    push_chat!(model, "Runtime: not connected (configure mcp_servers.json)", tstyle(:error))
-  end
+  push_chat!(model, "Agents: $(join(keys(AGENTS), ", "))", tstyle(:text_dim))
   push_chat!(model, "Type a message and press Enter. ^N/^P to switch tabs.", tstyle(:text_dim))
   push_chat!(model, "", tstyle(:text))
   app(model; default_bindings=true)
