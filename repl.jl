@@ -60,19 +60,29 @@ end
 # ── Main interpret function ──────────────────────────────────────────
 
 """
-    interpret(mod::Module, code::String; outbox=nothing, inbox=nothing) -> String
+    interpret(mod::Module, code::String; outbox=nothing, inbox=nothing, log=nothing) -> String
 
 Execute `code` in `mod` expression-by-expression via JuliaInterpreter,
 validating every function call through the safety system.
+
+If `log` is provided, writes each input/output pair in REPL-style format.
 
 Returns the string representation of the last expression's value.
 """
 function interpret(mod::Module, code::String;
                    outbox::Union{Channel,Nothing}=nothing,
-                   inbox::Union{Channel,Nothing}=nothing)
+                   inbox::Union{Channel,Nothing}=nothing,
+                   log::Union{IO,Nothing}=nothing)
   parsed = Meta.parseall(code)
   stmts = _flatten_toplevel(parsed)
   isempty(stmts) && return "nothing"
+
+  # Log the input
+  if log !== nothing
+    for (i, line) in enumerate(split(code, '\n'))
+      println(log, i == 1 ? "julia> $line" : "       $line")
+    end
+  end
 
   last_result = nothing
 
@@ -83,13 +93,28 @@ function interpret(mod::Module, code::String;
     frame = try
       Frame(mod, expr)
     catch e
-      throw(ErrorException("Failed to lower expression: $(sprint(showerror, e))"))
+      err_msg = "Failed to lower expression: $(sprint(showerror, e))"
+      if log !== nothing
+        println(log, "ERROR: $err_msg")
+        println(log)
+        flush(log)
+      end
+      throw(ErrorException(err_msg))
     end
 
     last_result = _step_frame!(frame; outbox, inbox)
   end
 
-  return string(last_result)
+  result_str = string(last_result)
+
+  # Log the output
+  if log !== nothing
+    println(log, result_str)
+    println(log)
+    flush(log)
+  end
+
+  return result_str
 end
 
 """Step through a single frame, validating calls, and return the final value."""

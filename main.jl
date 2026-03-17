@@ -274,6 +274,7 @@ struct Agent
   skills::Dict{String, Skill}
   path::FSPath
   repl_module::Module
+  repl_log::IOStream
 end
 
 const AGENTS = Dict{String, Agent}()
@@ -297,8 +298,9 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   soul_path = agent_dir*"soul.md"
   instr_path = agent_dir*"instructions.md"
   isfile(soul_path) && isfile(instr_path) || return nothing
+  logfile = open(string(agent_dir * "repl.log"), "a")
   Agent(id, read(soul_path, String), read(instr_path, String),
-        load_agent_skills(agent_dir), agent_dir, Module(Symbol("agent_$id")))
+        load_agent_skills(agent_dir), agent_dir, Module(Symbol("agent_$id")), logfile)
 end
 
 function load_agents!()
@@ -637,7 +639,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     if haskey(parsed, :eval)
       code = string(parsed.eval)
       result = try
-        interpret(agent.repl_module, code; outbox, inbox)
+        interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
       catch e
         e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
       end

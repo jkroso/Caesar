@@ -245,6 +245,39 @@ end
   @test contains(result, "test error")
 end
 
+@testset "interpret — REPL log" begin
+  mod = Module(:test_log)
+  logpath = tempname("/tmp") * ".log"
+  logfile = open(logpath, "w")
+
+  interpret(mod, "x = 1 + 2"; log=logfile)
+  interpret(mod, "y = x * 10"; log=logfile)
+  close(logfile)
+
+  content = read(logpath, String)
+  @test contains(content, "julia> x = 1 + 2")
+  @test contains(content, "3")
+  @test contains(content, "julia> y = x * 10")
+  @test contains(content, "30")
+
+  rm(logpath)
+end
+
+@testset "interpret — REPL log multiline" begin
+  mod = Module(:test_log_multi)
+  logpath = tempname("/tmp") * ".log"
+  logfile = open(logpath, "w")
+
+  interpret(mod, "function foo(x)\n  x + 1\nend"; log=logfile)
+  close(logfile)
+
+  content = read(logpath, String)
+  @test contains(content, "julia> function foo(x)")
+  @test contains(content, "         x + 1")
+
+  rm(logpath)
+end
+
 @testset "interpret — module isolation" begin
   mod1 = Module(:iso1)
   mod2 = Module(:iso2)
