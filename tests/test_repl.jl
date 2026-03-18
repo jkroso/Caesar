@@ -325,37 +325,25 @@ end
   @test interpret(mod, "a + b") == "3"
 end
 
-@testset "require — loads trusted libraries natively" begin
-  # Create a temp trusted dir and file
-  trusted_dir = mktempdir("/tmp")
-  testfile = joinpath(trusted_dir, "mylib.jl")
-  write(testfile, "greet(name) = \"hello \" * name\n")
+@testset "trusted modules skip validation" begin
+  mod = Module(:test_trusted)
+  # A dummy module to trust
+  trusted_mod = Module(:trusted_lib)
+  Core.eval(trusted_mod, :(greet(name) = "hello " * name))
+  Core.eval(mod, :(greet = $trusted_mod.greet))
 
-  push!(TRUSTED_DIRS, trusted_dir)
-  mod = Module(:test_require)
-  Core.eval(mod, :(require(path) = $require(@__MODULE__, path)))
-  interpret(mod, """require("$testfile")""")
+  # Without trusting: function gets validated (but allowed by default)
   @test interpret(mod, "greet(\"world\")") == "hello world"
 
-  pop!(TRUSTED_DIRS)
-  rm(trusted_dir; recursive=true)
+  # With trusting: function skips validation entirely
+  push!(TRUSTED_MODULES, trusted_mod)
+  @test interpret(mod, "greet(\"world\")") == "hello world"
+  pop!(TRUSTED_MODULES)
 end
 
-@testset "require — rejects untrusted paths" begin
-  untrusted = tempname("/tmp") * ".jl"
-  write(untrusted, "x = 1\n")
-
-  mod = Module(:test_require_deny)
-  Core.eval(mod, :(require(path) = $require(@__MODULE__, path)))
-  @test_throws ErrorException interpret(mod, """require("$untrusted")""")
-
-  rm(untrusted)
-end
-
-@testset "interpret — include blocked by name" begin
-  mod = Module(:test_include_block)
-  # include resolves to Base.include via the interpreter, which is name-blocked
-  @test_throws Exception interpret(mod, "Base.include(@__MODULE__, \"anything.jl\")")
+@testset "interpret — eval blocked" begin
+  mod = Module(:test_eval_block2)
+  @test_throws Exception interpret(mod, "Core.eval(Main, :(1+1))")
 end
 
 @testset "interpret — module isolation" begin

@@ -72,42 +72,25 @@ function _inject_globals(ex, vars::Set{Symbol})
   Expr(ex.head, [_inject_globals(a, vars) for a in ex.args]...)
 end
 
-# Functions blocked by name — catches per-module definitions (e.g. Module.eval)
-const _BLOCKED_NAMES = Set([:eval, :include])
+# ── Trusted modules ──────────────────────────────────────────────────
 
-# ── Trusted library loading ──────────────────────────────────────────
+"""Modules whose functions skip safety validation entirely.
+Functions from these modules execute natively without interception."""
+const TRUSTED_MODULES = Set{Module}()
 
-const TRUSTED_DIRS = String[]
+"""No functions are unconditionally blocked by name anymore.
+eval is controlled via validate() dispatches in safety.jl."""
+_name_blocked(f) = false
 
-"""
-    require(mod::Module, path::String)
-
-Load a trusted library into `mod` via native `include`, bypassing the
-interpreter and safety validation. Only files under `TRUSTED_DIRS` are
-allowed. Call `push!(TRUSTED_DIRS, dir)` to add trusted directories.
-"""
-function require(mod::Module, path::String)
-  abspath_ = abspath(expanduser(path))
-  isfile(abspath_) || error("File not found: $abspath_")
-  any(dir -> startswith(abspath_, rstrip(dir, '/') * "/"), TRUSTED_DIRS) ||
-    error("Not a trusted path: $abspath_\nTrusted dirs: $(join(TRUSTED_DIRS, ", "))")
-  Base.include(mod, abspath_)
-end
-
-"""Check if a function is blocked by name regardless of which module defines it."""
-function _name_blocked(f)::Bool
-  fname = try nameof(f) catch; return false end
-  fname in _BLOCKED_NAMES
-end
-
-"""Check whether a call should be validated (skip Core internals like tuple construction)."""
+"""Check whether a call should be validated (skip Core and trusted modules)."""
 function _should_validate(f)::Bool
   f isa Function || return false
-  # Always validate name-blocked functions regardless of module
-  _name_blocked(f) && return true
+  # Always validate eval regardless of module
+  fname = try nameof(f) catch; nothing end
+  fname === :eval && return true
   mod = try parentmodule(f) catch; return false end
-  # Skip Core builtins that are just data construction (tuple, etc.)
   mod === Core && return false
+  mod in TRUSTED_MODULES && return false
   true
 end
 
@@ -275,4 +258,4 @@ function _check_safety(f, args;
   nothing
 end
 
-export interpret, require, TRUSTED_DIRS
+export interpret, TRUSTED_MODULES

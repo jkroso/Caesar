@@ -30,9 +30,24 @@ validate(::typeof(open), f::Function, path::AbstractString, args...; kwargs...) 
 # Process execution
 validate(::typeof(run), cmd::Cmd) = command_verdict(cmd)
 
-# Prevent eval/Core.eval bypass
+# eval: allow import/using/include, deny arbitrary code execution
+validate(::typeof(eval), expr::Expr) = _eval_verdict(expr)
 validate(::typeof(eval), args...) = Deny
+validate(::typeof(Core.eval), ::Module, expr::Expr) = _eval_verdict(expr)
 validate(::typeof(Core.eval), args...) = Deny
+
+function _eval_verdict(expr::Expr)::SafetyVerdict
+  expr.head in (:using, :import, :toplevel, :block) || return Deny
+  # For blocks/toplevel, check all sub-expressions are safe
+  if expr.head in (:toplevel, :block)
+    for arg in expr.args
+      arg isa LineNumberNode && continue
+      arg isa Expr || return Deny
+      arg.head in (:using, :import) || return Deny
+    end
+  end
+  Allow
+end
 
 # Prevent ENV mutation
 validate(::typeof(setindex!), ::typeof(ENV), args...) = Deny
