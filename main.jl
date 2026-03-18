@@ -707,7 +707,7 @@ function __init__()
       "llm" => "qwen3.5:27b",
       "github_token" => "",
       "allowed_dirs" => [HOME, expanduser("~/projects")],
-      "allowed_commands" => ["ls *", "cat *", "head *", "tail *", "grep *", "find *", "git *", "julia *", "pwd", "echo *", "wc *"],
+      "allowed_commands" => ["ls *", "cat *", "head *", "tail *", "grep *", "find *", "git *", "julia *", "pwd", "echo *", "wc *", "open *", "/Applications/Google Chrome.app/*"],
       "log_level" => "info",
     ))
   end
