@@ -325,6 +325,16 @@ end
   @test interpret(mod, "a + b") == "3"
 end
 
+@testset "interpret — include allowed for loading skills" begin
+  mod = Module(:test_include)
+  # include should not be blocked — the interpreter validates included code
+  testfile = tempname("/tmp") * ".jl"
+  write(testfile, "greet(name) = \"hello \" * name\n")
+  interpret(mod, """Base.include(@__MODULE__, "$testfile")""")
+  @test interpret(mod, "greet(\"world\")") == "hello world"
+  rm(testfile)
+end
+
 @testset "interpret — module isolation" begin
   mod1 = Module(:iso1)
   mod2 = Module(:iso2)
