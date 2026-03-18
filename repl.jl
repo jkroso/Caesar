@@ -73,7 +73,26 @@ function _inject_globals(ex, vars::Set{Symbol})
 end
 
 # Functions blocked by name — catches per-module definitions (e.g. Module.eval)
-const _BLOCKED_NAMES = Set([:eval])
+const _BLOCKED_NAMES = Set([:eval, :include])
+
+# ── Trusted library loading ──────────────────────────────────────────
+
+const TRUSTED_DIRS = String[]
+
+"""
+    require(mod::Module, path::String)
+
+Load a trusted library into `mod` via native `include`, bypassing the
+interpreter and safety validation. Only files under `TRUSTED_DIRS` are
+allowed. Call `push!(TRUSTED_DIRS, dir)` to add trusted directories.
+"""
+function require(mod::Module, path::String)
+  abspath_ = abspath(expanduser(path))
+  isfile(abspath_) || error("File not found: $abspath_")
+  any(dir -> startswith(abspath_, rstrip(dir, '/') * "/"), TRUSTED_DIRS) ||
+    error("Not a trusted path: $abspath_\nTrusted dirs: $(join(TRUSTED_DIRS, ", "))")
+  Base.include(mod, abspath_)
+end
 
 """Check if a function is blocked by name regardless of which module defines it."""
 function _name_blocked(f)::Bool
@@ -255,3 +274,5 @@ function _check_safety(f, args;
   # Allow — proceed
   nothing
 end
+
+export interpret, require, TRUSTED_DIRS

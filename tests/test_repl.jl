@@ -325,14 +325,37 @@ end
   @test interpret(mod, "a + b") == "3"
 end
 
-@testset "interpret — include allowed for loading skills" begin
-  mod = Module(:test_include)
-  # include should not be blocked — the interpreter validates included code
-  testfile = tempname("/tmp") * ".jl"
+@testset "require — loads trusted libraries natively" begin
+  # Create a temp trusted dir and file
+  trusted_dir = mktempdir("/tmp")
+  testfile = joinpath(trusted_dir, "mylib.jl")
   write(testfile, "greet(name) = \"hello \" * name\n")
-  interpret(mod, """Base.include(@__MODULE__, "$testfile")""")
+
+  push!(TRUSTED_DIRS, trusted_dir)
+  mod = Module(:test_require)
+  Core.eval(mod, :(require(path) = $require(@__MODULE__, path)))
+  interpret(mod, """require("$testfile")""")
   @test interpret(mod, "greet(\"world\")") == "hello world"
-  rm(testfile)
+
+  pop!(TRUSTED_DIRS)
+  rm(trusted_dir; recursive=true)
+end
+
+@testset "require — rejects untrusted paths" begin
+  untrusted = tempname("/tmp") * ".jl"
+  write(untrusted, "x = 1\n")
+
+  mod = Module(:test_require_deny)
+  Core.eval(mod, :(require(path) = $require(@__MODULE__, path)))
+  @test_throws ErrorException interpret(mod, """require("$untrusted")""")
+
+  rm(untrusted)
+end
+
+@testset "interpret — include blocked by name" begin
+  mod = Module(:test_include_block)
+  # include resolves to Base.include via the interpreter, which is name-blocked
+  @test_throws Exception interpret(mod, "Base.include(@__MODULE__, \"anything.jl\")")
 end
 
 @testset "interpret — module isolation" begin

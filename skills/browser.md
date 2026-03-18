@@ -10,7 +10,7 @@ You can control a headless Chrome browser to browse the web, interact with web a
 ## Setup
 
 ```julia
-Base.include(@__MODULE__, expanduser("~/Prosca/skills/browser.jl"))
+require("~/Prosca/skills/browser.jl")
 b = Browser()
 ```
 

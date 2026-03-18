@@ -11,7 +11,7 @@
 @use YAML
 @use UUIDs
 @use "./safety"...
-@use "./repl" interpret
+@use "./repl" interpret require TRUSTED_DIRS
 
 # ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Prosca")
@@ -300,8 +300,8 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   isfile(soul_path) && isfile(instr_path) || return nothing
   logfile = open(string(agent_dir * "repl.log"), "w")
   mod = Module(Symbol("agent_$id"))
-  # Seed the REPL module with Kip's @use so the agent can load packages
-  Core.eval(mod, :(using Kip))
+  # Seed the REPL module with require() for loading trusted libraries
+  Core.eval(mod, :(require(path) = $require(@__MODULE__, path)))
   Agent(id, read(soul_path, String), read(instr_path, String),
         load_agent_skills(agent_dir), agent_dir, mod, logfile)
 end
@@ -794,6 +794,13 @@ function __init__()
   load_commands!()
   load_skills!()
   load_agents!()
+
+  # Set up trusted library paths for the REPL
+  empty!(TRUSTED_DIRS)
+  push!(TRUSTED_DIRS, string(SKILLS_DIR))
+  for agent in values(AGENTS)
+    push!(TRUSTED_DIRS, string(agent.path * "skills"))
+  end
 
   # Build memory indexes
   for agent_id in keys(AGENTS)
