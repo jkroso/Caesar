@@ -355,7 +355,7 @@ function Tachikoma.view(m::ProscaModel, f::Frame)
   status_right = Span[
     Span("^N/^P:tabs ", tstyle(:text_dim)),
     Span("Ctrl+Q:quit ", tstyle(:text_dim)),
-    Span("$(CONFIG["llm"]) ", tstyle(:primary)),
+    Span("$(get(CONFIG, "llm", "")) ", tstyle(:primary)),
   ]
   sbar = StatusBar(; left=status_left, right=status_right,
                    style=Style(; bg=tstyle(:border).fg))
@@ -454,7 +454,7 @@ end
 let model = ProscaModel()
   push_chat!(model, "Prosca started", tstyle(:success, bold=true))
   push_chat!(model, "Brain: $HOME", tstyle(:text_dim))
-  push_chat!(model, "Model: $(CONFIG["llm"])", tstyle(:text_dim))
+  push_chat!(model, "Model: $(get(CONFIG, "llm", "not configured"))", tstyle(:text_dim))
   push_chat!(model, "Agents: $(join(keys(AGENTS), ", "))", tstyle(:text_dim))
   push_chat!(model, "Type a message and press Enter. ^N/^P to switch tabs.", tstyle(:text_dim))
   push_chat!(model, "", tstyle(:text))
