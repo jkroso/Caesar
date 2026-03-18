@@ -73,7 +73,7 @@ function _inject_globals(ex, vars::Set{Symbol})
 end
 
 # Functions blocked by name — catches per-module definitions (e.g. Module.eval)
-const _BLOCKED_NAMES = Set([:eval, :include])
+const _BLOCKED_NAMES = Set([:eval])
 
 """Check if a function is blocked by name regardless of which module defines it."""
 function _name_blocked(f)::Bool

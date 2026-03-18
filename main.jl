@@ -299,8 +299,11 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   instr_path = agent_dir*"instructions.md"
   isfile(soul_path) && isfile(instr_path) || return nothing
   logfile = open(string(agent_dir * "repl.log"), "w")
+  mod = Module(Symbol("agent_$id"))
+  # Seed the REPL module with Kip's @use so the agent can load packages
+  Core.eval(mod, :(using Kip))
   Agent(id, read(soul_path, String), read(instr_path, String),
-        load_agent_skills(agent_dir), agent_dir, Module(Symbol("agent_$id")), logfile)
+        load_agent_skills(agent_dir), agent_dir, mod, logfile)
 end
 
 function load_agents!()
