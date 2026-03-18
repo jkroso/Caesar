@@ -3,7 +3,8 @@
 # Launches headless Chrome and controls it via CDP over WebSocket.
 # Cookie state persists across sessions via a dedicated user-data-dir.
 
-using HTTP, JSON3
+@use HTTP
+@use JSON3
 
 # ── Types ────────────────────────────────────────────────────────────
 
@@ -290,4 +291,4 @@ function browser_clear_cookies()
   "Cookies cleared"
 end
 
-using Base64
+@use Base64

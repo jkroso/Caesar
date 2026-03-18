@@ -12,7 +12,7 @@ You can control a headless Chrome browser to browse the web, interact with web a
 Load the browser module into your REPL before using any browser functions:
 
 ```julia
-include(joinpath(homedir(), "Prosca", "skills", "browser.jl"))
+@use "~/Prosca/skills/browser.jl"...
 browser_open()
 ```
 
