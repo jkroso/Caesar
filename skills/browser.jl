@@ -292,3 +292,8 @@ function browser_clear_cookies()
 end
 
 @use Base64
+
+export browser_open, browser_close, browser_navigate, browser_click, browser_type,
+       browser_submit, browser_text, browser_html, browser_url, browser_title,
+       browser_eval, browser_screenshot, browser_wait, browser_cookies,
+       browser_set_cookie, browser_clear_cookies
