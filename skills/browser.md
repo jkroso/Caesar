@@ -22,8 +22,8 @@ All methods take a `Browser` as the first argument.
 
 ### Navigation
 - `navigate!(b, url)` — Go to a URL and wait for page load
-- `url(b)` — Get current page URL
-- `title(b)` — Get current page title
+- `b.url` — Get current page URL
+- `b.title` — Get current page title
 
 ### Reading Content
 - `text(b, selector="body")` — Get text content of an element

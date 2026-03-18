@@ -6,6 +6,7 @@
 @use HTTP
 @use JSON3
 @use Base64
+@use "github.com/jkroso/Prospects.jl" @property
 
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 const DATA_DIR = joinpath(homedir(), "Prosca", "browser-data")
@@ -192,8 +193,8 @@ function html(b::Browser, selector::String="body")
   """)
 end
 
-url(b::Browser) = js(b, "window.location.href")
-title(b::Browser) = js(b, "document.title")
+@property Browser.url = js(self, "window.location.href")
+@property Browser.title = js(self, "document.title")
 
 # ── JavaScript ───────────────────────────────────────────────────────
 
@@ -263,5 +264,5 @@ function clear_cookies!(b::Browser)
   "Cookies cleared"
 end
 
-export Browser, navigate!, click!, type!, submit!, text, html, url, title,
+export Browser, navigate!, click!, type!, submit!, text, html,
        js, cdp, screenshot, wait, cookies, set_cookie!, clear_cookies!
