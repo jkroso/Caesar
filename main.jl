@@ -372,7 +372,10 @@ function update_agent!(id::String; soul::Union{String,Nothing}=nothing, instruct
   true
 end
 
-default_agent()::Agent = get(AGENTS, "prosca", first(values(AGENTS)))
+function default_agent()::Agent
+  isempty(AGENTS) && error("No agents loaded. Check that __init__() ran successfully.")
+  get(AGENTS, "prosca", first(values(AGENTS)))
+end
 
 function merged_skills(agent::Agent)::Dict{String, Skill}
   merged = copy(SKILLS)
@@ -809,3 +812,5 @@ end
 
 export AgentMessage, ToolCallRequest, ToolResult, AgentDone, UserInput, ToolApproval, ToolApprovalRetracted,
        run_agent, HOME, CONFIG, default_agent, Agent
+
+__init__()
