@@ -5,25 +5,21 @@
 
 @use HTTP
 @use JSON3
+@use Base64
 
-# ── Types ────────────────────────────────────────────────────────────
+const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+const DATA_DIR = joinpath(homedir(), "Prosca", "browser-data")
 
-mutable struct CDPSession
+# ── Browser ──────────────────────────────────────────────────────────
+
+mutable struct Browser
   process::Base.Process
   send_ch::Channel{Tuple{String, Channel}}
   msg_id::Int
   running::Bool
-  ready::Channel{Nothing}
 end
 
-const _SESSION = Ref{Union{CDPSession, Nothing}}(nothing)
-const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-const DATA_DIR = joinpath(homedir(), "Prosca", "browser-data")
-
-# ── Connection ───────────────────────────────────────────────────────
-
-function browser_open(; port::Int=9222)
-  _SESSION[] !== nothing && return "Browser already open"
+function Browser(; port::Int=9222)
   mkpath(DATA_DIR)
 
   proc = run(Cmd([CHROME_PATH,
@@ -46,7 +42,6 @@ function browser_open(; port::Int=9222)
           break
         end
       end
-      # If no page target exists, create one
       if ws_url === nothing
         HTTP.get("http://localhost:$port/json/new"; retry=false, readtimeout=2)
         continue
@@ -60,18 +55,16 @@ function browser_open(; port::Int=9222)
 
   send_ch = Channel{Tuple{String, Channel}}(32)
   ready_ch = Channel{Nothing}(1)
-  session = CDPSession(proc, send_ch, 0, true, ready_ch)
+  b = Browser(proc, send_ch, 0, true)
 
-  # WebSocket connection runs in background task
   @async begin
     try
       HTTP.WebSockets.open(ws_url) do ws
         responses = Dict{Int, Channel}()
 
-        # Reader task
         @async begin
           try
-            while session.running
+            while b.running
               data = HTTP.WebSockets.receive(ws)
               msg = JSON3.read(String(data))
               if msg isa AbstractDict && haskey(msg, :id)
@@ -80,63 +73,53 @@ function browser_open(; port::Int=9222)
               end
             end
           catch
-            session.running = false
+            b.running = false
           end
         end
 
-        put!(ready_ch, nothing)  # signal that WebSocket is connected
+        put!(ready_ch, nothing)
 
-        # Writer loop — processes send requests, keeps connection alive
         for (json_msg, resp_ch) in send_ch
-          session.running || break
+          b.running || break
           parsed = JSON3.read(json_msg)
           responses[parsed[:id]] = resp_ch
           HTTP.WebSockets.send(ws, json_msg)
         end
       end
-    catch e
-      session.running = false
+    catch
+      b.running = false
       isopen(ready_ch) && put!(ready_ch, nothing)
     end
   end
 
-  _SESSION[] = session
-  take!(ready_ch)  # wait for WebSocket to connect
+  take!(ready_ch)
 
-  # Enable required CDP domains
-  _cdp("Page.enable")
-  _cdp("Runtime.enable")
-  _cdp("Network.enable")
-  "Browser opened"
+  cdp(b, "Page.enable")
+  cdp(b, "Runtime.enable")
+  cdp(b, "Network.enable")
+  b
 end
 
-function browser_close()
-  s = _SESSION[]
-  s === nothing && return "No browser open"
-  s.running = false
-  close(s.send_ch)
-  # Kill Chrome and all its child processes
+function Base.close(b::Browser)
+  b.running = false
+  close(b.send_ch)
   try
-    pid = getpid(s.process)
+    pid = getpid(b.process)
     run(`pkill -P $pid`; wait=false)
-    kill(s.process)
+    kill(b.process)
   catch end
-  _SESSION[] = nothing
-  "Browser closed"
+  nothing
 end
 
 # ── CDP transport ────────────────────────────────────────────────────
 
-function _cdp(method::String, params::Dict{String,Any}=Dict{String,Any}(); timeout::Int=30)
-  s = _SESSION[]
-  s === nothing && error("Browser not open. Call browser_open() first.")
-  s.running || error("Browser session is closed")
-
-  s.msg_id += 1
-  id = s.msg_id
+function cdp(b::Browser, method::String, params::Dict{String,Any}=Dict{String,Any}(); timeout::Int=30)
+  b.running || error("Browser session is closed")
+  b.msg_id += 1
+  id = b.msg_id
   resp_ch = Channel{Any}(1)
   msg = JSON3.write(Dict("id" => id, "method" => method, "params" => params))
-  put!(s.send_ch, (msg, resp_ch))
+  put!(b.send_ch, (msg, resp_ch))
 
   result = timedwait(() -> isready(resp_ch), float(timeout))
   result == :timed_out && error("CDP command timed out: $method")
@@ -150,11 +133,10 @@ end
 
 # ── Navigation ───────────────────────────────────────────────────────
 
-function browser_navigate(url::String)
-  _cdp("Page.navigate", Dict{String,Any}("url" => url))
-  # Wait for page load
+function navigate!(b::Browser, url::String)
+  cdp(b, "Page.navigate", Dict{String,Any}("url" => url))
   sleep(1)
-  _cdp("Runtime.evaluate", Dict{String,Any}(
+  cdp(b, "Runtime.evaluate", Dict{String,Any}(
     "expression" => "document.readyState",
     "returnByValue" => true
   ))
@@ -163,8 +145,8 @@ end
 
 # ── DOM interaction ──────────────────────────────────────────────────
 
-function browser_click(selector::String)
-  _js("""
+function click!(b::Browser, selector::String)
+  js(b, """
     const el = document.querySelector($(JSON3.write(selector)));
     if (!el) throw new Error('Element not found: $(escape_string(selector))');
     el.click();
@@ -172,9 +154,8 @@ function browser_click(selector::String)
   """)
 end
 
-function browser_type(selector::String, text::String)
-  # Focus the element and set value, dispatching input events
-  _js("""
+function type!(b::Browser, selector::String, text::String)
+  js(b, """
     const el = document.querySelector($(JSON3.write(selector)));
     if (!el) throw new Error('Element not found: $(escape_string(selector))');
     el.focus();
@@ -185,8 +166,8 @@ function browser_type(selector::String, text::String)
   """)
 end
 
-function browser_submit(selector::String)
-  _js("""
+function submit!(b::Browser, selector::String)
+  js(b, """
     const el = document.querySelector($(JSON3.write(selector)));
     if (!el) throw new Error('Element not found: $(escape_string(selector))');
     const form = el.closest('form') || el;
@@ -197,36 +178,27 @@ end
 
 # ── Reading ──────────────────────────────────────────────────────────
 
-function browser_text(selector::String="body")
-  _js("""
+function text(b::Browser, selector::String="body")
+  js(b, """
     const el = document.querySelector($(JSON3.write(selector)));
     el ? el.innerText : ''
   """)
 end
 
-function browser_html(selector::String="body")
-  _js("""
+function html(b::Browser, selector::String="body")
+  js(b, """
     const el = document.querySelector($(JSON3.write(selector)));
     el ? el.innerHTML : ''
   """)
 end
 
-function browser_url()
-  _js("window.location.href")
-end
-
-function browser_title()
-  _js("document.title")
-end
+url(b::Browser) = js(b, "window.location.href")
+title(b::Browser) = js(b, "document.title")
 
 # ── JavaScript ───────────────────────────────────────────────────────
 
-function browser_eval(js::String)
-  _js(js)
-end
-
-function _js(expression::String)
-  result = _cdp("Runtime.evaluate", Dict{String,Any}(
+function js(b::Browser, expression::String)
+  result = cdp(b, "Runtime.evaluate", Dict{String,Any}(
     "expression" => expression,
     "returnByValue" => true,
     "awaitPromise" => true
@@ -244,8 +216,8 @@ end
 
 # ── Screenshot ───────────────────────────────────────────────────────
 
-function browser_screenshot(; path::Union{String,Nothing}=nothing)
-  result = _cdp("Page.captureScreenshot", Dict{String,Any}("format" => "png"))
+function screenshot(b::Browser; path::Union{String,Nothing}=nothing)
+  result = cdp(b, "Page.captureScreenshot", Dict{String,Any}("format" => "png"))
   data = Base64.base64decode(result[:data])
   out = path !== nothing ? path : tempname() * ".png"
   write(out, data)
@@ -254,10 +226,10 @@ end
 
 # ── Wait ─────────────────────────────────────────────────────────────
 
-function browser_wait(selector::String; timeout::Int=10)
+function wait(b::Browser, selector::String; timeout::Int=10)
   deadline = time() + timeout
   while time() < deadline
-    found = _js("""document.querySelector($(JSON3.write(selector))) !== null""")
+    found = js(b, """document.querySelector($(JSON3.write(selector))) !== null""")
     found === true && return true
     sleep(0.3)
   end
@@ -266,34 +238,30 @@ end
 
 # ── Cookies ──────────────────────────────────────────────────────────
 
-function browser_cookies(; url::Union{String,Nothing}=nothing)
+function cookies(b::Browser; url::Union{String,Nothing}=nothing)
   params = Dict{String,Any}()
   url !== nothing && (params["urls"] = [url])
-  result = _cdp("Network.getCookies", params)
+  result = cdp(b, "Network.getCookies", params)
   result[:cookies]
 end
 
-function browser_set_cookie(; name::String, value::String, domain::String,
-                             path::String="/", httpOnly::Bool=false, secure::Bool=false,
-                             sameSite::String="Lax", expires::Float64=-1.0)
+function set_cookie!(b::Browser; name::String, value::String, domain::String,
+                     path::String="/", httpOnly::Bool=false, secure::Bool=false,
+                     sameSite::String="Lax", expires::Float64=-1.0)
   cookie = Dict{String,Any}(
     "name" => name, "value" => value, "domain" => domain,
     "path" => path, "httpOnly" => httpOnly, "secure" => secure,
     "sameSite" => sameSite
   )
   expires > 0 && (cookie["expires"] = expires)
-  _cdp("Network.setCookie", cookie)
+  cdp(b, "Network.setCookie", cookie)
   "Cookie set: $name"
 end
 
-function browser_clear_cookies()
-  _cdp("Network.clearBrowserCookies")
+function clear_cookies!(b::Browser)
+  cdp(b, "Network.clearBrowserCookies")
   "Cookies cleared"
 end
 
-@use Base64
-
-export browser_open, browser_close, browser_navigate, browser_click, browser_type,
-       browser_submit, browser_text, browser_html, browser_url, browser_title,
-       browser_eval, browser_screenshot, browser_wait, browser_cookies,
-       browser_set_cookie, browser_clear_cookies
+export Browser, navigate!, click!, type!, submit!, text, html, url, title,
+       js, cdp, screenshot, wait, cookies, set_cookie!, clear_cookies!
