@@ -149,6 +149,7 @@ end
 # ── Poll REPL log for new lines ───────────────────────────────────────
 
 function poll_repl_log!(m::ProscaModel)
+  isempty(AGENTS) && return
   agent = default_agent()
   logpath = string(agent.path * "repl.log")
   isfile(logpath) || return
@@ -371,8 +372,8 @@ function render_chat!(m::ProscaModel, rect::Rect, buf::Buffer)
 end
 
 function render_repl_log!(m::ProscaModel, rect::Rect, buf::Buffer)
-  agent = default_agent()
-  m.repl_scroll.block = Block(title="REPL ($(agent.id))", border_style=tstyle(:border),
+  label = isempty(AGENTS) ? "REPL" : "REPL ($(default_agent().id))"
+  m.repl_scroll.block = Block(title=label, border_style=tstyle(:border),
                                title_style=tstyle(:accent, bold=true))
   render(m.repl_scroll, rect, buf)
 end
