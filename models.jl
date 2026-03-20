@@ -2,7 +2,7 @@
 
 @use JSON3
 
-const API_JSON_PATH = joinpath(@__DIR__, "gui", "public", "api.json")
+const API_JSON_PATH = joinpath(@__DIR__, "api.json")
 
 # (input_price, output_price) in USD per 1M tokens
 const PRICING = Dict{String, Tuple{Float64, Float64}}()

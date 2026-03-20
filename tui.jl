@@ -4,6 +4,7 @@
 
 @use "."... AGENTS
 @use Tachikoma...
+@use CommonMark
 
 # ── Model ─────────────────────────────────────────────────────────────
 
@@ -43,6 +44,19 @@ end
 function push_chat!(m::ProscaModel, prefix::AbstractString, prefix_style::Style,
                     body::AbstractString, body_style::Style)
   push_chat!(m, [Span(prefix, prefix_style), Span(body, body_style)])
+end
+
+function push_markdown!(m::ProscaModel, prefix::AbstractString, prefix_style::Style,
+                        md_text::AbstractString)
+  width = max(20, 80)  # reasonable default; scroll pane handles wrapping too
+  lines = markdown_to_spans(md_text, width)
+  for (i, line) in enumerate(lines)
+    if i == 1
+      pushfirst!(line, Span(prefix, prefix_style))
+    end
+    push!(m.messages, line)
+    push_line!(m.scroll, line)
+  end
 end
 
 function submit_input!(m::ProscaModel)
@@ -181,7 +195,11 @@ function drain_agent_events!(m::ProscaModel)
   while isready(m.outbox)
     event = take!(m.outbox)
     if event isa AgentMessage
-      push_chat!(m, "Agent: ", tstyle(:primary, bold=true), event.text, tstyle(:text))
+      if markdown_extension_loaded()
+        push_markdown!(m, "Agent: ", tstyle(:primary, bold=true), event.text)
+      else
+        push_chat!(m, "Agent: ", tstyle(:primary, bold=true), event.text, tstyle(:text))
+      end
     elseif event isa ToolCallRequest
       push_chat!(m, "  Tool: $(event.name) ", tstyle(:accent, bold=true),
                  event.args, tstyle(:text_dim))
@@ -451,6 +469,8 @@ function render_agents!(rect::Rect, buf::Buffer)
 end
 
 # ── Launch ────────────────────────────────────────────────────────────
+
+enable_markdown()
 
 let model = ProscaModel()
   push_chat!(model, "Prosca started", tstyle(:success, bold=true))

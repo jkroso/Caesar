@@ -1,0 +1,3 @@
+[submodule "models.dev"]
+	path = models.dev
+	url = https://github.com/anomalyco/models.dev.git

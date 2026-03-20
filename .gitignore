@@ -1,7 +1,6 @@
 memories
 docs
-config.yaml
+/config.yaml
 .superpowers/
-gui
 personal
 browser-data/

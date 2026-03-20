@@ -13,6 +13,8 @@
 @use Base64
 @use "./safety"...
 @use "./repl" interpret TRUSTED_MODULES
+@use "./gateway/mail_auth" MailAuth ensure_token!
+@use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
 
 # ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Prosca")
@@ -23,6 +25,7 @@ const CONFIG = Dict{String,Any}()
 const DB = Ref{SQLite.DB}()
 const LLM_SCHEMA = Ref{Any}()
 const EMBED_MODEL = Ref{String}("qwen3-embedding:8b")
+const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 # Agent → Interface events
 struct AgentMessage
@@ -708,6 +711,9 @@ end
 # ── Initialization (runs at runtime, not precompile) ─────────────────
 
 function __init__()
+  # Skip runtime initialization during precompilation
+  Base.generating_output() && return
+
   # Load config
   if !isfile(HOME * "config.yaml")
     YAML.write_file(HOME * "config.yaml", Dict(
@@ -793,6 +799,14 @@ function __init__()
   LLM_SCHEMA[] = _detect_schema()
   EMBED_MODEL[] = get(CONFIG, "embed_model", "qwen3-embedding:8b")
 
+  # Initialize mail auth if configured
+  gw = get(CONFIG, "gateway", Dict())
+  zoho_cfg = get(gw, "zoho_mail", nothing)
+  if zoho_cfg !== nothing
+    MAIL_AUTH[] = MailAuth(zoho_cfg)
+    @info "Mail configured for $(zoho_cfg["from_address"])"
+  end
+
   # Load everything
   load_tools!()
   load_commands!()
@@ -813,4 +827,3 @@ end
 export AgentMessage, ToolCallRequest, ToolResult, AgentDone, UserInput, ToolApproval, ToolApprovalRetracted,
        run_agent, HOME, CONFIG, default_agent, Agent
 
-__init__()

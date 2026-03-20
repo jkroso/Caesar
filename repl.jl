@@ -159,7 +159,6 @@ function interpret(mod::Module, code::String;
         err_msg = "Failed to lower expression: $(sprint(showerror, e))"
         if log !== nothing
           println(log, "ERROR: $err_msg")
-          println(log)
           flush(log)
         end
         throw(ErrorException(err_msg))
@@ -170,7 +169,6 @@ function interpret(mod::Module, code::String;
   catch e
     if log !== nothing && error_thrown !== e
       println(log, "ERROR: $(sprint(showerror, e))")
-      println(log)
       flush(log)
     end
     rethrow()
@@ -181,7 +179,6 @@ function interpret(mod::Module, code::String;
   # Log the output
   if log !== nothing
     println(log, result_str)
-    println(log)
     flush(log)
   end
 
