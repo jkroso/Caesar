@@ -5,3 +5,4 @@ config.yaml
 personal
 browser-data/
 Project.toml
+agents/*/login/

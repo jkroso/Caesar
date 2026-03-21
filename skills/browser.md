@@ -51,9 +51,20 @@ Cookies persist across sessions automatically via Chrome's user data directory.
 ### Low-level
 - `cdp(b, method, params)` — Send a raw CDP command
 
+## JavaScript shorthand
+
+For executing JavaScript, prefer `{"js": "code"}` over `{"eval": "js(b, \"...\")"}`.
+The shorthand avoids nested escaping — just write your JS naturally:
+
+```json
+{"js": "document.querySelector('input[name=\"firstName\"]').value = 'Alice'"}
+```
+
+The browser variable must be named `b`.
+
 ## Tips
 
 - Use `text(b)` to read page content, not screenshots
-- Use `js(b, code)` for anything the helper functions don't cover
+- Use `{"js": "code"}` for anything the helper functions don't cover (avoids escaping pain)
 - Use `wait(b, selector)` after navigation or clicks that trigger page changes
 - CSS selectors work like in the browser: `"#id"`, `".class"`, `"button[type=submit]"`, etc.

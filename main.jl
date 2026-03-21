@@ -656,6 +656,11 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   Variables and functions persist across evaluations.
   Use standard Julia for introspection: names(@__MODULE__), methods(f), typeof(x), etc.
 
+  ## Browser JavaScript shorthand
+  When the browser skill is active, use {"js": "code"} to execute JavaScript directly in the browser.
+  This is equivalent to {"eval": "js(b, \"...\")"} but avoids nested escaping issues.
+  The browser variable must be named `b`. Single and double quotes in your JS code are fine.
+
   ## Built-in Tools
   Available tools (respond with valid JSON only):
   $(join(TOOL_SCHEMAS, "\n"))
@@ -682,7 +687,14 @@ function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing
   if is_local
     use_model = use_model[length("ollama:")+1:end]
   end
-  default_timeout = is_local ? 300 : 60
+  default_timeout = if is_local
+    300
+  elseif any(p -> contains(lowercase(use_model), p), ("reason", "think", "-r1", "deepthink")) ||
+         any(p -> startswith(lowercase(use_model), p), ("o1", "o3", "o4"))
+    180
+  else
+    60
+  end
   timeout = get(CONFIG, "llm_timeout", default_timeout)
   use_schema = schema !== nothing ? schema : LLM_SCHEMA[]
   if model !== nothing && schema === nothing
@@ -789,6 +801,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     if parsed === nothing
       looks_like_json = contains(response_text, "\"tool\"") && contains(response_text, "\"args\"") ||
                         contains(response_text, "\"eval\"") ||
+                        contains(response_text, "\"js\"") ||
                         contains(response_text, "\"final_answer\"") ||
                         contains(response_text, "\"skill\"") ||
                         contains(response_text, "\"handoff\"")
@@ -868,6 +881,23 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       end
       put!(outbox, ToolResult("eval", result))
       log_memory("Eval: $code → $(result[1:min(500,end)])"; agent_id=agent.id, conversation_id)
+      push!(messages, PromptingTools.AIMessage(response_text))
+      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      continue
+    end
+
+    if haskey(parsed, :js)
+      js_code = string(parsed.js)
+      code = "js(b, $(repr(js_code)))"
+      result = try
+        cd(string(agent.path)) do
+          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
+        end
+      catch e
+        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+      end
+      put!(outbox, ToolResult("js", result))
+      log_memory("JS: $(js_code[1:min(200,end)]) → $(result[1:min(500,end)])"; agent_id=agent.id, conversation_id)
       push!(messages, PromptingTools.AIMessage(response_text))
       push!(messages, PromptingTools.UserMessage("Result: $result"))
       continue
