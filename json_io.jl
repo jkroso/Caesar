@@ -8,9 +8,14 @@
 
 @use "./main"...
 @use "./scheduler"...
-@use Dates DateTime now
-@use "./gateway/gateway"...
 @use "./gateway/telegram"...
+@use Dates...
+@use PromptingTools
+@use HTTP
+@use JSON3
+@use SQLite
+@use YAML
+@use UUIDs
 
 const AGENT_LOCK = ReentrantLock()
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))

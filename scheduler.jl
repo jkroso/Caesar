@@ -1,6 +1,6 @@
 # scheduler.jl — Cron parser and scheduler tick logic
 
-@use Dates
+@use Dates...
 @use SQLite
 @use UUIDs
 @use JSON3
@@ -103,5 +103,12 @@ function unseen_notable_count(db::SQLite.DB)::Int
   rows = SQLite.DBInterface.execute(db,
     "SELECT COUNT(*) as c FROM routine_runs WHERE notable=1 AND seen=0") |> SQLite.rowtable
   rows[1].c
+end
+
+for n in names(@__MODULE__; all=true)
+  n in (nameof(@__MODULE__), :eval, :include) && continue
+  startswith(string(n), '#') && continue
+  startswith(string(n), '⭒') && continue
+  @eval export $n
 end
 

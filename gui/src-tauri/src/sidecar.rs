@@ -50,7 +50,7 @@ impl SidecarProcess {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    log::debug!("[prosca stderr] {}", line);
+                    eprintln!("[prosca stderr] {}", line);
                 }
             }
         });

@@ -1,8 +1,9 @@
 # gateway/telegram.jl — Telegram channel adapter
 
 @use "./telegram_api"...
+@use "../main" ChannelAdapter PresenceRouter OutboundEnvelope InboundEnvelope PendingApproval channel_symbol send_message retract_message resolve_approval ToolApproval
 @use SQLite
-@use Dates
+@use Dates...
 @use Logging
 
 mutable struct TelegramAdapter <: ChannelAdapter
@@ -313,4 +314,11 @@ function on_inbound(router::PresenceRouter, env::InboundEnvelope{:telegram})
   else
       @warn "No inbound handler registered on PresenceRouter for Telegram message"
   end
+end
+
+for n in names(@__MODULE__; all=true)
+  n in (nameof(@__MODULE__), :eval, :include) && continue
+  startswith(string(n), '#') && continue
+  startswith(string(n), '⭒') && continue
+  @eval export $n
 end

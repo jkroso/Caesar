@@ -46,6 +46,8 @@ pub fn run() {
     // to find the Prosca root. In dev mode, fall back to PROSCA_DIR env var
     // or the parent of the current directory.
     let prosca_dir = std::env::var("PROSCA_DIR").unwrap_or_else(|_| {
+        eprintln!("[prosca] current_exe: {:?}", std::env::current_exe());
+        eprintln!("[prosca] current_dir: {:?}", std::env::current_dir());
         std::env::current_exe()
             .ok()
             .and_then(|p| {
@@ -69,6 +71,7 @@ pub fn run() {
             })
     });
 
+    eprintln!("[prosca] resolved prosca_dir: {}", prosca_dir);
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init());

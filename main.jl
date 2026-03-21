@@ -60,6 +60,219 @@ struct ToolApprovalRetracted
   reason::String
 end
 
+# ── Channel Gateway ──────────────────────────────────────────────────
+
+struct InboundEnvelope{C}
+  sender_id::String
+  text::String
+  topic_id::String
+  reply_to_id::Union{String,Nothing}
+  raw::Dict
+  received_at::Dates.DateTime
+end
+
+struct OutboundEnvelope{C}
+  text::String
+  topic_id::String
+  reply_to_id::Union{String,Nothing}
+  buttons::Vector{Tuple{String,String}}  # (label, callback_data) for inline keyboards
+end
+
+OutboundEnvelope{C}(text::String, topic_id::String) where C =
+  OutboundEnvelope{C}(text, topic_id, nothing, Tuple{String,String}[])
+
+abstract type ChannelAdapter end
+
+function start!(adapter::ChannelAdapter, gateway) end
+function stop!(adapter::ChannelAdapter) end
+is_connected(::ChannelAdapter) = false
+
+function send_message(adapter::ChannelAdapter, env::OutboundEnvelope)::String
+  error("send_message not implemented for $(typeof(adapter))")
+end
+
+function retract_message(adapter::ChannelAdapter, message_id::String)
+  error("retract_message not implemented for $(typeof(adapter))")
+end
+
+mutable struct PendingApproval
+  id::UInt64
+  tool_name::String
+  args::String
+  conversation_id::Union{String,Nothing}
+  current_target::Symbol
+  telegram_message_id::Union{String,Nothing}
+  lock::ReentrantLock
+  response::Channel{ToolApproval}
+end
+
+mutable struct PresenceRouter
+  idle_threshold_mins::Int
+  active_adapters::Vector{ChannelAdapter}
+  pending_approvals::Dict{UInt64, PendingApproval}
+  gui_io::Union{Function, Nothing}
+  check_gui_active::Union{Function, Nothing}
+  _inbound_handler::Union{Function, Nothing}
+end
+
+PresenceRouter(; idle_threshold_mins=15) = PresenceRouter(
+  idle_threshold_mins,
+  ChannelAdapter[],
+  Dict{UInt64, PendingApproval}(),
+  nothing,
+  nothing,
+  nothing
+)
+
+channel_symbol(::ChannelAdapter) = :unknown
+
+function register_adapter!(router::PresenceRouter, adapter::ChannelAdapter)
+  push!(router.active_adapters, adapter)
+end
+
+function primary_adapter(router::PresenceRouter)::Union{ChannelAdapter, Nothing}
+  isempty(router.active_adapters) ? nothing : first(router.active_adapters)
+end
+
+function gui_is_active(router::PresenceRouter)::Bool
+  router.check_gui_active === nothing && return false
+  try
+    router.check_gui_active()
+  catch
+    false
+  end
+end
+
+function route_approval(router::PresenceRouter, request::ToolCallRequest, inbox::Channel;
+                      conversation_id::Union{String,Nothing}=nothing)
+  pa = PendingApproval(
+    request.id, request.name, request.args, conversation_id,
+    :gui, nothing, ReentrantLock(), Channel{ToolApproval}(1)
+  )
+  router.pending_approvals[request.id] = pa
+  adapter = primary_adapter(router)
+  if gui_is_active(router)
+    lock(pa.lock) do
+      pa.current_target = :gui
+    end
+    if router.gui_io !== nothing
+      router.gui_io(Dict("type" => "tool_call_request",
+                        "id" => string(request.id),
+                        "name" => request.name,
+                        "args" => request.args);
+                   conversation_id)
+    end
+  elseif adapter !== nothing
+    _send_approval_to_adapter(router, pa, adapter)
+  else
+    lock(pa.lock) do
+      pa.current_target = :gui
+    end
+    if router.gui_io !== nothing
+      router.gui_io(Dict("type" => "tool_call_request",
+                        "id" => string(request.id),
+                        "name" => request.name,
+                        "args" => request.args);
+                   conversation_id)
+    end
+  end
+  approval = take!(pa.response)
+  delete!(router.pending_approvals, request.id)
+  put!(inbox, approval)
+end
+
+function _send_approval_to_adapter(router::PresenceRouter, pa::PendingApproval, adapter::ChannelAdapter)
+  C = channel_symbol(adapter)
+  env = OutboundEnvelope{C}(
+    "Approval needed\nTool: $(pa.tool_name)\nArgs: $(pa.args)",
+    "_approvals",
+    nothing,
+    [("Approve", "approve:$(pa.id)"),
+     ("Deny", "deny:$(pa.id)"),
+     ("Always", "always:$(pa.id)")]
+  )
+  lock(pa.lock) do
+    msg_id = send_message(adapter, env)
+    pa.telegram_message_id = msg_id
+    pa.current_target = C
+  end
+end
+
+function resolve_approval(router::PresenceRouter, id::UInt64, decision::Symbol, from_target::Symbol)::Bool
+  pa = get(router.pending_approvals, id, nothing)
+  pa === nothing && return false
+  return lock(pa.lock) do
+    if pa.current_target != from_target
+      false
+    else
+      put!(pa.response, ToolApproval(id, decision))
+      true
+    end
+  end
+end
+
+function check_pending_approvals!(router::PresenceRouter)
+  adapter = primary_adapter(router)
+  gui_active = gui_is_active(router)
+  for (id, pa) in router.pending_approvals
+    lock(pa.lock) do
+      C = adapter !== nothing ? channel_symbol(adapter) : :unknown
+      if pa.current_target == :gui && !gui_active && adapter !== nothing
+        if router.gui_io !== nothing
+          router.gui_io(Dict("type" => "tool_approval_retracted",
+                            "id" => pa.id,
+                            "reason" => "routed_to_telegram");
+                       pa.conversation_id)
+        end
+        _send_approval_to_adapter(router, pa, adapter)
+      elseif pa.current_target == C && gui_active && adapter !== nothing
+        if pa.telegram_message_id !== nothing
+          try retract_message(adapter, pa.telegram_message_id) catch end
+          pa.telegram_message_id = nothing
+        end
+        pa.current_target = :gui
+        if router.gui_io !== nothing
+          router.gui_io(Dict("type" => "tool_call_request",
+                            "id" => string(pa.id),
+                            "name" => pa.tool_name,
+                            "args" => pa.args);
+                       pa.conversation_id)
+        end
+      end
+    end
+  end
+end
+
+function route_notification(router::PresenceRouter, text::String;
+                         project_id::Union{String,Nothing}=nothing,
+                         routine_id::Union{String,Nothing}=nothing,
+                         extra_gui_emit::Union{Function,Nothing}=nothing)
+  adapter = primary_adapter(router)
+  if gui_is_active(router) || adapter === nothing
+    if router.gui_io !== nothing
+      d = Dict{String,Any}("type" => "notification", "text" => text)
+      project_id !== nothing && (d["project_id"] = project_id)
+      routine_id !== nothing && (d["routine_id"] = routine_id)
+      router.gui_io(d)
+    end
+    extra_gui_emit !== nothing && extra_gui_emit()
+  else
+    C = channel_symbol(adapter)
+    topic = project_id !== nothing ? project_id : "_general"
+    env = OutboundEnvelope{C}(text, topic)
+    try send_message(adapter, env) catch e
+      @warn "Failed to send notification to adapter" exception=e
+      if router.gui_io !== nothing
+        d = Dict{String,Any}("type" => "notification", "text" => text)
+        project_id !== nothing && (d["project_id"] = project_id)
+        routine_id !== nothing && (d["routine_id"] = routine_id)
+        router.gui_io(d)
+      end
+      extra_gui_emit !== nothing && extra_gui_emit()
+    end
+  end
+end
+
 # ── LLM Schema Detection ────────────────────────────────────────────
 
 function _detect_schema()
@@ -521,7 +734,8 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
   append!(messages, window)
   push!(messages, PromptingTools.UserMessage("$memories\n\nTask: $user_input"))
 
-  max_steps = get(CONFIG, "max_steps", 15)
+  max_steps = get(CONFIG, "max_steps", 1000)
+  hit_limit = false
   for step in 1:max_steps
     if step > 1 && step % 5 == 0
       user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
@@ -646,7 +860,9 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     if haskey(parsed, :eval)
       code = string(parsed.eval)
       result = try
-        interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
+        cd(string(agent.path)) do
+          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
+        end
       catch e
         e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
       end
@@ -695,6 +911,11 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
 
     push!(messages, PromptingTools.AIMessage(response_text))
     push!(messages, PromptingTools.UserMessage("Tool result: $result"))
+    step == max_steps && (hit_limit = true)
+  end
+
+  if hit_limit
+    put!(outbox, AgentMessage("Stopped: reached the maximum of $max_steps steps."))
   end
 
   put!(outbox, AgentDone())
@@ -824,6 +1045,11 @@ function __init__()
   end
 end
 
-export AgentMessage, ToolCallRequest, ToolResult, AgentDone, UserInput, ToolApproval, ToolApprovalRetracted,
-       run_agent, HOME, CONFIG, default_agent, Agent
+# Export everything that json_io.jl and other consumers need
+for n in names(@__MODULE__; all=true)
+  n in (nameof(@__MODULE__), :eval, :include) && continue
+  startswith(string(n), '#') && continue
+  startswith(string(n), '⭒') && continue
+  @eval export $n
+end
 

@@ -1,6 +1,7 @@
 # gateway/gateway.jl — Channel gateway: envelope types, adapter interface, presence router
 
-@use Dates
+@use Dates...
+@use "../main" ToolApproval ToolCallRequest
 
 # ── Envelope types (type-parameterized by channel symbol) ───────────
 

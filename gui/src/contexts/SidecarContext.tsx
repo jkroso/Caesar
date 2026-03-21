@@ -15,6 +15,8 @@ const SidecarContext = createContext<SidecarContextValue | null>(null);
 export function SidecarProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SidecarStatus>("disconnected");
   const handlersRef = useRef<Set<(event: SidecarEvent) => void>>(new Set());
+  const readyRef = useRef(false);
+  const queueRef = useRef<string[]>([]);
 
   const start = useCallback(async () => {
     setStatus("starting");
@@ -29,6 +31,10 @@ export function SidecarProvider({ children }: { children: ReactNode }) {
   const send = useCallback(async (msg: object) => {
     console.log("[Agent Input]", msg);
     const json = JSON.stringify(msg);
+    if (!readyRef.current) {
+      queueRef.current.push(json);
+      return;
+    }
     await invoke("send_to_sidecar", { message: json });
   }, []);
 
@@ -38,6 +44,7 @@ export function SidecarProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const restart = useCallback(async () => {
+    readyRef.current = false;
     await invoke("stop_sidecar");
     await start();
   }, [start]);
@@ -54,7 +61,13 @@ export function SidecarProvider({ children }: { children: ReactNode }) {
           const parsed: SidecarEvent = JSON.parse(event.payload);
           console.log("[Agent Output]", parsed);
           if (parsed.type === "ready") {
+            readyRef.current = true;
             setStatus("ready");
+            // Flush queued messages
+            const queued = queueRef.current.splice(0);
+            for (const json of queued) {
+              invoke("send_to_sidecar", { message: json }).catch(() => {});
+            }
           }
           for (const handler of handlersRef.current) {
             handler(parsed);
