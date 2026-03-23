@@ -62,8 +62,27 @@ The shorthand avoids nested escaping — just write your JS naturally:
 
 The browser variable must be named `b`.
 
+## State-Based Interaction (preferred for complex pages)
+
+Instead of guessing CSS selectors, use `state(b)` to get a numbered list of all interactive elements, then interact by index:
+
+- `index_page(b)` — Returns indexed list of all visible interactive elements on the page
+- `interact!(b, index, "click")` — Click element by index
+- `interact!(b, index, "type", "hello")` — Type into element by index
+- `interact!(b, index, "select", "option_value")` — Select option by index
+
+Or use the shorthand (no Julia needed):
+```json
+{"index_page": true}
+```
+
+**Workflow:** call `index_page(b)` (or `{"state": true}`) to see what's on the page, then `interact!(b, index, action)` to act on it. Re-call `index_page(b)` after page changes since indices reset.
+
+Use CSS selectors (`click!`, `type!`) when you already know the exact selector. Use `index_page(b)` when exploring or on unfamiliar pages.
+
 ## Tips
 
+- Use `index_page(b)` to understand a page before interacting — it's more reliable than guessing selectors
 - Use `text(b)` to read page content, not screenshots
 - Use `{"js": "code"}` for anything the helper functions don't cover (avoids escaping pain)
 - Use `wait(b, selector)` after navigation or clicks that trigger page changes

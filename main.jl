@@ -1,7 +1,6 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use LinearAlgebra...
 @use PromptingTools
-@use RAGTools...
 @use LibGit2
 @use Logging
 @use SQLite
@@ -15,6 +14,10 @@
 @use "./repl" interpret TRUSTED_MODULES
 @use "./gateway/mail_auth" MailAuth ensure_token!
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
+@use "./ori/engine" Engine init_engine search rebuild! update_note!
+@use "./ori/embeddings" OllamaIndex
+@use "./ori/vault" extract_links
+@use "./ori/types" Note ScoredNote
 
 # ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Prosca")
@@ -24,8 +27,11 @@ const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn"
 const CONFIG = Dict{String,Any}()
 const DB = Ref{SQLite.DB}()
 const LLM_SCHEMA = Ref{Any}()
-const EMBED_MODEL = Ref{String}("qwen3-embedding:8b")
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
+
+const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
+const ORI_LOCKS = Dict{String, ReentrantLock}()
+ori_lock(agent_id) = get!(() -> ReentrantLock(), ORI_LOCKS, agent_id)
 
 # Agent → Interface events
 struct AgentMessage
@@ -306,101 +312,220 @@ function _detect_schema_for(model::String)
   end
 end
 
-# ── Embeddings ───────────────────────────────────────────────────────
-const EMBED_SCHEMA = PromptingTools.OllamaSchema()
-
-function get_embedding(text::String)::Union{Vector{Float64}, Nothing}
-  try
-    msg = PromptingTools.aiembed(EMBED_SCHEMA, text; model=EMBED_MODEL[], copy=true)
-    normalize(vec(msg.content))
-  catch e
-    @warn "Embedding failed: $e"
-    nothing
-  end
-end
-
-# ── Memory (RAGTools) ────────────────────────────────────────────────
-const MEMORY_INDEXES = Dict{Tuple{String, Union{String,Nothing}}, ChunkIndex}()
-
-function rebuild_memory_index(; agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
-  query, params = if conversation_id !== nothing
-    "SELECT id, content FROM memories WHERE agent_id = ? AND conversation_id = ? ORDER BY timestamp DESC", (agent_id, conversation_id)
-  else
-    "SELECT id, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL ORDER BY timestamp DESC", (agent_id,)
-  end
-  rows = map(SQLite.DBInterface.execute(DB[], query, params)) do row
-    (id=row.id, content=row.content)
-  end
-
-  key = (agent_id, conversation_id)
-  if isempty(rows)
-    @info "No memories yet for agent=$agent_id conversation=$(something(conversation_id, "global"))"
-    MEMORY_INDEXES[key] = build_index(["(empty memory)"]; chunker_kwargs=(; sources=["mem-0"]))
-    return
-  end
-
-  docs = [r.content for r in rows]
-  sources = ["mem-$(r.id)" for r in rows]
-  MEMORY_INDEXES[key] = build_index(docs; chunker_kwargs=(; sources))
-  @info "RAG index rebuilt with $(length(docs)) memories for agent=$agent_id conversation=$(something(conversation_id, "global"))"
-end
 
 function log_memory(text::String; role::String="Agent", metadata=Dict(),
                     agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
-  emb = get_embedding(text)
-  stmt = SQLite.Stmt(DB[], """
-    INSERT INTO memories (timestamp, role, content, embedding, metadata, agent_id, conversation_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  """)
-  SQLite.execute(stmt, (Dates.now(Dates.UTC), role, text, emb === nothing ? "" : JSON3.write(emb), JSON3.write(metadata), agent_id, conversation_id))
-  rebuild_memory_index(; agent_id, conversation_id)
+  dir = AGENTS_DIR * agent_id * "logs"
+  mkpath(dir)
+  path = dir * "$(Dates.format(Dates.today(), "yyyy-mm-dd")).log"
+  open(string(path), "a") do io
+    ts = Dates.format(Dates.now(Dates.UTC), "HH:MM:SS")
+    println(io, "[$ts] [$role] $text")
+  end
 end
 
 function search_memories(query::String; limit::Int=5,
                          agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)::String
-  key = (agent_id, conversation_id)
-  index = get(MEMORY_INDEXES, key, nothing)
-  if index === nothing || isempty(index.chunks)
-    return "(no memories yet)"
-  end
-  try
-    result = retrieve(index, query; top_k=limit)
-    ctx = result.context
-    isempty(ctx) && return "(no relevant memories)"
-    "=== Relevant past memories ===\n" * join(ctx, "\n\n")
-  catch e
-    @warn "Memory search failed: $e"
-    "(memory search unavailable)"
+  entry = get(MEMORY_PROVIDERS, agent_id, nothing)
+  entry === nothing && return "(no memories yet)"
+  provider, conn = entry
+  if provider == :ori
+    results = lock(ori_lock(agent_id)) do
+      if conversation_id != conn.last_conversation_id
+        empty!(conn.context)
+        conn.last_conversation_id = conversation_id
+      end
+      search(conn, query; top_k=limit)
+    end
+    isempty(results) && return "(no relevant memories)"
+    lines = map(results) do r
+      note = get(conn.notes, r.id, nothing)
+      snippet = note === nothing ? "" : first(note.body, 200)
+      "$(r.title) ($(round(r.score; digits=2))): $snippet"
+    end
+    "=== Relevant memories ===\n" * join(lines, "\n\n")
+  elseif provider == :hindsight
+    hs = @use("./memory/hindsight/hindsight")
+    results = hs.recall(conn, query; limit)
+    isempty(results) && return "(no relevant memories)"
+    lines = [get(r, "text", "") for r in results]
+    "=== Relevant memories ===\n" * join(lines, "\n\n")
+  else
+    "(unknown memory provider)"
   end
 end
 
-function prune_memories(;older_than_days::Int=30, batch_size::Int=50,
-                        agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
-  cutoff = Dates.now(Dates.UTC) - Dates.Day(older_than_days)
-  query, params = if conversation_id !== nothing
-    "SELECT id, role, content FROM memories WHERE agent_id = ? AND conversation_id = ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (agent_id, conversation_id, string(cutoff), batch_size)
+const EXTRACTION_MSG_COUNTS = Dict{String, Int}()
+
+function extract_knowledge(messages::Vector, agent_id::String)
+  entry = get(MEMORY_PROVIDERS, agent_id, nothing)
+  entry === nothing && return
+  provider, engine = entry
+  provider == :ori || return
+
+  msg_count = length(messages)
+  last_count = get(EXTRACTION_MSG_COUNTS, agent_id, 0)
+  msg_count <= last_count && return
+  EXTRACTION_MSG_COUNTS[agent_id] = msg_count
+
+  window = get(CONFIG, "extraction_window", 10)
+  recent = messages[max(1, end-window+1):end]
+  conversation = join([string(typeof(m).name.name, ": ", m.content) for m in recent], "\n\n")
+
+  prompt = """You are a knowledge extraction system. Given the following conversation, extract any facts, decisions, or learnings worth remembering long-term.
+
+Return a JSON array. Each element:
+{"title": "Short descriptive title", "body": "Content with [[Wiki Links]] to related concepts", "type": "note|decision|learning|log", "space": "notes|self|ops", "tags": ["optional"]}
+
+Rules:
+- Only extract genuinely noteworthy information, not routine chatter
+- Use [[Wiki Links]] to connect related concepts
+- Classify: "decision" for choices made, "learning" for insights, "note" for facts, "log" for session ops
+- Use "self" space for agent identity/goals, "ops" for session logs, "notes" for everything else
+- Dangling [[Wiki Links]] are fine
+- If nothing noteworthy, return []
+
+Return ONLY a JSON array, no other text."""
+
+  extraction_model = get(CONFIG, "extraction_model", nothing)
+  response = try
+    msgs = [PromptingTools.SystemMessage(prompt), PromptingTools.UserMessage(conversation)]
+    if extraction_model !== nothing
+      call_llm(msgs; model=extraction_model).content
+    else
+      call_llm(msgs).content
+    end
+  catch e
+    @warn "Knowledge extraction LLM call failed" exception=e
+    return
+  end
+
+  notes_data = try
+    JSON3.read(response, Vector{Dict{String, Any}})
+  catch
+    m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, response)
+    m === nothing && (@warn "Extraction returned invalid JSON"; return)
+    try JSON3.read(m.captures[1], Vector{Dict{String, Any}}) catch; @warn "Extraction JSON parse failed"; return end
+  end
+
+  isempty(notes_data) && return
+
+  updated_ids = String[]
+  for nd in notes_data
+    title = get(nd, "title", nothing)
+    body = get(nd, "body", nothing)
+    (title === nothing || body === nothing) && continue
+    note = update_note!(engine, String(title), String(body);
+                        type=Symbol(get(nd, "type", "note")),
+                        space=Symbol(get(nd, "space", "notes")),
+                        tags=String.(get(nd, "tags", String[])))
+    push!(updated_ids, note.id)
+  end
+
+  isempty(updated_ids) && return
+
+  # Incremental index rebuild
+  notes_vec = collect(values(engine.notes))
+  engine.graph = @use("./ori/graph").build_graph(notes_vec)
+  engine.bm25 = @use("./ori/bm25").build_bm25(notes_vec)
+  engine.bridges = @use("./ori/graph").articulation_points(engine.graph)
+  if engine.semantic isa OllamaIndex
+    @use("./ori/embeddings").embed_new!(engine.semantic, engine.notes)
   else
-    "SELECT id, role, content FROM memories WHERE agent_id = ? AND conversation_id IS NULL AND timestamp < ? ORDER BY timestamp ASC LIMIT ?", (agent_id, string(cutoff), batch_size)
-  end
-  rows = map(SQLite.DBInterface.execute(DB[], query, params)) do row
-    (id=row.id, role=row.role, content=row.content)
+    @use("./ori/tfidf").embed_new!(engine.semantic, engine.notes)
   end
 
-  isempty(rows) && return "No old memories to prune."
+  # Feed learning
+  for id in updated_ids
+    @use("./ori/vitality").record_access!(engine.db, id)
+  end
+  length(updated_ids) > 1 && @use("./ori/learning").record_cooccurrence!(engine.db, updated_ids)
 
-  texts = join(["$(r.role): $(r.content)" for r in rows], "\n")
-  summary = call_llm([
-    PromptingTools.SystemMessage("Summarize these memories into a concise paragraph preserving key facts and decisions:"),
-    PromptingTools.UserMessage(texts)
-  ]).content
+  @info "Extracted $(length(updated_ids)) knowledge notes for agent=$agent_id"
+end
 
-  ids = join([string(r.id) for r in rows], ",")
-  SQLite.execute(DB[], "DELETE FROM memories WHERE id IN ($ids)")
+function consolidate!(engine::Engine, agent_id::String)
+  vitality = @use("./ori/vitality").get_all_vitality(engine.db, engine.graph.incoming)
+  low_ids = [id for (id, v) in vitality if v < 0.3]
+  isempty(low_ids) && return "No low-vitality notes to consolidate."
 
-  rebuild_memory_index(; agent_id, conversation_id)
-  log_memory("Memory consolidation: $summary"; role="System", agent_id, conversation_id)
+  low_set = Set(low_ids)
+  visited = Set{String}()
+  clusters = Vector{String}[]
+  for seed in low_ids
+    seed in visited && continue
+    cluster = String[]
+    queue = [(seed, 0)]
+    while !isempty(queue)
+      id, depth = popfirst!(queue)
+      id in visited && continue
+      id in low_set || continue
+      push!(visited, id)
+      push!(cluster, id)
+      depth >= 2 && continue
+      for nb in @use("./ori/graph").neighbors(engine.graph, id)
+        nb in visited || push!(queue, (nb, depth + 1))
+      end
+    end
+    length(cluster) >= 3 && push!(clusters, cluster)
+  end
 
-  "Pruned $(length(rows)) old memories into one summary."
+  consolidated = 0
+  for cluster in clusters
+    bodies = [engine.notes[id].title * ": " * engine.notes[id].body
+              for id in cluster if haskey(engine.notes, id)]
+    isempty(bodies) && continue
+
+    summary = try
+      call_llm([
+        PromptingTools.SystemMessage("Summarize these related knowledge notes into one consolidated note. Preserve key facts and use [[Wiki Links]] to connect to other concepts. Return only the note body text."),
+        PromptingTools.UserMessage(join(bodies, "\n\n---\n\n"))
+      ]).content
+    catch e
+      @warn "Consolidation LLM call failed" exception=e
+      continue
+    end
+
+    titles = [engine.notes[id].title for id in cluster if haskey(engine.notes, id)]
+    consolidated_title = "Consolidated: " * join(titles[1:min(3, end)], ", ")
+    note = update_note!(engine, consolidated_title, summary; type=:note)
+    @use("./ori/vitality").record_access!(engine.db, note.id)
+
+    for id in cluster
+      n = get(engine.notes, id, nothing)
+      n === nothing && continue
+      isfile(n.path) && rm(n.path)
+      delete!(engine.notes, id)
+      SQLite.execute(engine.db, "DELETE FROM vitality WHERE note_id = ?", (id,))
+      SQLite.execute(engine.db, "DELETE FROM qvalues WHERE note_id = ?", (id,))
+      SQLite.execute(engine.db, "DELETE FROM cooccurrence WHERE source_id = ? OR target_id = ?", (id, id))
+    end
+    consolidated += 1
+  end
+
+  for id in low_ids
+    id in visited && continue
+    haskey(engine.notes, id) || continue
+    v = get(vitality, id, 0.5)
+    v >= 0.1 && continue
+    incoming = get(engine.graph.incoming, id, Set{String}())
+    !isempty(incoming) && continue
+    id in engine.bridges && continue
+    n = engine.notes[id]
+    isfile(n.path) && rm(n.path)
+    delete!(engine.notes, id)
+    SQLite.execute(engine.db, "DELETE FROM vitality WHERE note_id = ?", (id,))
+    SQLite.execute(engine.db, "DELETE FROM qvalues WHERE note_id = ?", (id,))
+  end
+
+  consolidated > 0 && rebuild!(engine)
+
+  SQLite.execute(engine.db, """
+    INSERT INTO metadata (key, value) VALUES ('last_consolidated_at', ?)
+    ON CONFLICT(key) DO UPDATE SET value = ?
+  """, (string(Dates.now(Dates.UTC)), string(Dates.now(Dates.UTC))))
+
+  "Consolidated $consolidated clusters, checked $(length(low_ids)) low-vitality notes."
 end
 
 # ── Tools ────────────────────────────────────────────────────────────
@@ -492,6 +617,7 @@ struct Agent
   path::FSPath
   repl_module::Module
   repl_log::IOStream
+  config::Dict{String, Any}
 end
 
 const AGENTS = Dict{String, Agent}()
@@ -517,10 +643,16 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   isfile(soul_path) && isfile(instr_path) || return nothing
   logfile = open(string(agent_dir * "repl.log"), "w")
   mod = Module(Symbol("agent_$id"))
-  # Seed the REPL module with Kip's @use
   Core.eval(mod, :(using Kip))
+  cfg_path = agent_dir * "config.yaml"
+  config = try
+    isfile(cfg_path) ? YAML.load_file(string(cfg_path)) : Dict{String, Any}()
+  catch
+    Dict{String, Any}()
+  end
+  config isa Dict || (config = Dict{String, Any}())
   Agent(id, read(soul_path, String), read(instr_path, String),
-        load_agent_skills(agent_dir), agent_dir, mod, logfile)
+        load_agent_skills(agent_dir), agent_dir, mod, logfile, config)
 end
 
 function load_agents!()
@@ -643,13 +775,23 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
     """
   end
 
+  # Memory provider system prompt
+  entry = get(MEMORY_PROVIDERS, agent.id, nothing)
+  memory_section = ""
+  if entry !== nothing
+    provider, _ = entry
+    prompt_path = joinpath(@__DIR__, "memory", string(provider), "system.md")
+    if isfile(prompt_path)
+      memory_section = "\n" * read(prompt_path, String)
+    end
+  end
+
   """
   $(agent.personality)
 
   Current instructions:
   $(agent.instructions)
-
-  You have persistent memory across sessions.
+  $memory_section
 
   ## Julia REPL
   You have a persistent Julia REPL. Use {"eval": "code"} to evaluate Julia expressions.
@@ -763,7 +905,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
       break
     end
-    @debug "LLM response ($(length(response_text)) chars): $(response_text[1:min(200, end)])"
+    @debug "LLM response ($(length(response_text)) chars): $(first(response_text, 200))"
 
     json_str = strip(response_text)
     m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, json_str)
@@ -880,7 +1022,7 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
         e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
       end
       put!(outbox, ToolResult("eval", result))
-      log_memory("Eval: $code → $(result[1:min(500,end)])"; agent_id=agent.id, conversation_id)
+      log_memory("Eval: $code → $(first(result, 500))"; agent_id=agent.id, conversation_id)
       push!(messages, PromptingTools.AIMessage(response_text))
       push!(messages, PromptingTools.UserMessage("Result: $result"))
       continue
@@ -897,7 +1039,23 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
         e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
       end
       put!(outbox, ToolResult("js", result))
-      log_memory("JS: $(js_code[1:min(200,end)]) → $(result[1:min(500,end)])"; agent_id=agent.id, conversation_id)
+      log_memory("JS: $(first(js_code, 200)) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
+      push!(messages, PromptingTools.AIMessage(response_text))
+      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      continue
+    end
+
+    if get(parsed, :index_page, nothing) == true
+      code = "index_page(b)"
+      result = try
+        cd(string(agent.path)) do
+          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
+        end
+      catch e
+        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+      end
+      put!(outbox, ToolResult("index_page", result))
+      log_memory("State: $(first(result, 500))"; agent_id=agent.id, conversation_id)
       push!(messages, PromptingTools.AIMessage(response_text))
       push!(messages, PromptingTools.UserMessage("Result: $result"))
       continue
@@ -935,9 +1093,9 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     catch e
       "Tool error ($(typeof(e))): $(sprint(showerror, e))"
     end
-    @info "Tool result: $(result[1:min(200, end)])"
+    @info "Tool result: $(first(result, 200))"
     put!(outbox, ToolResult(tn, result))
-    log_memory("Tool: $tn($args_str) → $(result[1:min(500, end)])"; agent_id=agent.id, conversation_id)
+    log_memory("Tool: $tn($args_str) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
 
     push!(messages, PromptingTools.AIMessage(response_text))
     push!(messages, PromptingTools.UserMessage("Tool result: $result"))
@@ -955,6 +1113,40 @@ function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::
     if messages[i] isa PromptingTools.AIMessage
       push!(session_history, messages[i])
       break
+    end
+  end
+
+  # Async memory retention
+  entry = get(MEMORY_PROVIDERS, agent.id, nothing)
+  if entry !== nothing
+    provider, conn = entry
+    if provider == :ori
+      @async begin
+        try
+          lock(ori_lock(agent.id)) do
+            extract_knowledge(messages, agent.id)
+          end
+        catch e
+          @warn "Knowledge extraction failed" exception=e
+        end
+      end
+    elseif provider == :hindsight
+      @async begin
+        try
+          hs = @use("./memory/hindsight/hindsight")
+          last_response = ""
+          for i in length(messages):-1:1
+            if messages[i] isa PromptingTools.AIMessage
+              last_response = messages[i].content
+              break
+            end
+          end
+          hs.retain(conn, "User: $user_input\n\nAssistant: $last_response";
+                    context="conversation turn")
+        catch e
+          @warn "Hindsight retain failed" exception=e
+        end
+      end
     end
   end
 end
@@ -1048,7 +1240,6 @@ function __init__()
 
   # Initialize LLM schema
   LLM_SCHEMA[] = _detect_schema()
-  EMBED_MODEL[] = get(CONFIG, "embed_model", "qwen3-embedding:8b")
 
   # Initialize mail auth if configured
   gw = get(CONFIG, "gateway", Dict())
@@ -1064,15 +1255,63 @@ function __init__()
   load_skills!()
   load_agents!()
 
+  # Initialize memory providers per agent
+  for (agent_id, agent) in AGENTS
+    provider_name = get(agent.config, "memory", "ori")
+    try
+      if provider_name == "ori"
+        vault_dir = string(agent.path * "vault")
+        mkpath(vault_dir)
+        MEMORY_PROVIDERS[agent_id] = (:ori, init_engine(vault_dir))
+        @info "Memory: ori for agent=$agent_id"
+      elseif provider_name == "hindsight"
+        hs = @use("./memory/hindsight/hindsight")
+        llm_key = get(CONFIG, "openai_key", "")
+        port = get(CONFIG, "hindsight_port", 8888)
+        admin_port = get(CONFIG, "hindsight_admin_port", 9999)
+        conn = hs.init(agent_id; port, admin_port, llm_key, mission=agent.personality)
+        if conn !== nothing
+          MEMORY_PROVIDERS[agent_id] = (:hindsight, conn)
+          @info "Memory: hindsight for agent=$agent_id"
+        else
+          @warn "Hindsight init failed for agent=$agent_id, running without memory"
+        end
+      else
+        @warn "Unknown memory provider '$provider_name' for agent=$agent_id"
+      end
+    catch e
+      @warn "Memory init failed for agent=$agent_id" exception=e
+    end
+  end
+
+  # Daily consolidation check (Ori agents only)
+  for (agent_id, (provider, conn)) in MEMORY_PROVIDERS
+    provider == :ori || continue
+    try
+      row = SQLite.DBInterface.execute(conn.db,
+        "SELECT value FROM metadata WHERE key = 'last_consolidated_at'") |> collect
+      needs_consolidation = if isempty(row) || row[1].value === missing
+        true
+      else
+        last_run = Dates.DateTime(row[1].value)
+        Dates.now(Dates.UTC) - last_run > Dates.Day(1)
+      end
+      if needs_consolidation
+        lock(ori_lock(agent_id)) do
+          result = consolidate!(conn, agent_id)
+          @info "Consolidation for $agent_id: $result"
+        end
+      end
+    catch e
+      @warn "Consolidation check failed for $agent_id" exception=e
+    end
+  end
+
   # Trust modules that the agent's skills depend on
   for mod in [HTTP, JSON3, Base64]
     push!(TRUSTED_MODULES, mod)
   end
 
-  # Build memory indexes
-  for agent_id in keys(AGENTS)
-    rebuild_memory_index(; agent_id)
-  end
 end
 
 # Export everything that json_io.jl and other consumers need

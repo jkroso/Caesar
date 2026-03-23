@@ -264,5 +264,36 @@ function clear_cookies!(b::Browser)
   "Cookies cleared"
 end
 
+# ── State-based interaction ──────────────────────────────────────
+
+function index_page(b::Browser)
+  js_code = read(joinpath(@__DIR__, "domstate.js"), String)
+  js(b, js_code)
+end
+
+function interact!(b::Browser, index::Int, action::String, value::String="")
+  js(b, """
+    const el = window.__prosca_elements && window.__prosca_elements[$(index)];
+    if (!el) throw new Error('Element index $(index) not found — call state(b) first');
+    const action = $(JSON3.write(action));
+    if (action === 'click') { el.click(); 'clicked' }
+    else if (action === 'type') {
+      el.focus();
+      el.value = $(JSON3.write(value));
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+      'typed'
+    }
+    else if (action === 'select') {
+      el.value = $(JSON3.write(value));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+      'selected'
+    }
+    else if (action === 'focus') { el.focus(); 'focused' }
+    else { throw new Error('Unknown action: ' + action); }
+  """)
+end
+
 export Browser, navigate!, click!, type!, submit!, text, html,
-       js, cdp, screenshot, wait, cookies, set_cookie!, clear_cookies!
+       js, cdp, screenshot, wait, cookies, set_cookie!, clear_cookies!,
+       index_page, interact!
