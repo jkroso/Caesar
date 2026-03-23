@@ -23,9 +23,9 @@ function api(conn::HindsightConn, method, path; body=nothing)
 end
 
 function init(agent_id; url="http://localhost:8888", port=8888, admin_port=9999,
-              llm_key="", mission="")
+              llm_key="", llm_provider="", llm_model="", mission="")
   if !is_running()
-    ensure_running(; port, admin_port, llm_key) || return nothing
+    ensure_running(; port, admin_port, llm_key, llm_provider, llm_model) || return nothing
   end
   try
     api(HindsightConn(url, agent_id), "PUT", "/banks/$(agent_id)";
@@ -42,7 +42,7 @@ function retain(conn::HindsightConn, content; context=nothing, metadata=nothing)
   context !== nothing && (item["context"] = context)
   metadata !== nothing && (item["metadata"] = metadata)
   try
-    api(conn, "POST", "/banks/$(conn.bank_id)/memories/retain";
+    api(conn, "POST", "/banks/$(conn.bank_id)/memories";
         body=Dict("items" => [item]))
     true
   catch e
@@ -69,7 +69,7 @@ function reflect(conn::HindsightConn, query; context=nothing)
   body = Dict{String, Any}("query" => query)
   context !== nothing && (body["context"] = context)
   try
-    resp = api(conn, "POST", "/banks/$(conn.bank_id)/memories/reflect"; body)
+    resp = api(conn, "POST", "/banks/$(conn.bank_id)/reflect"; body)
     string(get(resp, :text, ""))
   catch e
     @warn "Hindsight reflect failed" exception=e
