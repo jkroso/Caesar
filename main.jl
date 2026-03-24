@@ -20,7 +20,7 @@
 @use "./ori/types" Note ScoredNote
 
 # ── Constants set at precompile time ─────────────────────────────────
-const HOME = mkpath(home() * "Prosca")
+const HOME = mkpath(home() * "Caesar")
 const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn" => Logging.Warn, "error" => Logging.Error)
 
 # ── Mutable state initialized at runtime ─────────────────────────────
@@ -1269,7 +1269,7 @@ function __init__()
         llm_key = get(CONFIG, "openai_key", "")
         port = get(CONFIG, "hindsight_port", 8888)
         admin_port = get(CONFIG, "hindsight_admin_port", 9999)
-        conn = hs.init(agent_id; port, admin_port, llm_key, mission=agent.personality)
+        conn = Base.invokelatest(hs.init, agent_id; port, admin_port, llm_key, mission=agent.personality)
         if conn !== nothing
           MEMORY_PROVIDERS[agent_id] = (:hindsight, conn)
           @info "Memory: hindsight for agent=$agent_id"

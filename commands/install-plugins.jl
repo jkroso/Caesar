@@ -6,7 +6,7 @@ const description = "Clone a plugin repo and symlink its skills and tools"
 
 function fn(args::String)::String
   url = strip(args)
-  isempty(url) && return "Usage: ;install-plugins <git-url>"
+  isempty(url) && return "Usage: /install-plugins <git-url>"
 
   # Parse repo name from URL
   m = match(r"([^/]+?)(?:\.git)?$", url)

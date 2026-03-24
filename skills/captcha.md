@@ -10,11 +10,11 @@ Automatically detect and solve captchas on the current page. Requires an active 
 ## Setup
 
 ```julia
-@use "~/Prosca/skills/captcha.jl"...
+@use "~/Caesar/skills/captcha.jl"...
 ```
 
 This imports browser.jl automatically — you don't need to load it separately.
-The `capsolver_key` must be set in `~/Prosca/config.yaml`.
+The `capsolver_key` must be set in `~/Caesar/config.yaml`.
 
 ## Usage
 
@@ -45,8 +45,8 @@ Returns a dict with `type`, `sitekey`, and any metadata — or `nothing` if no c
 ## Typical workflow
 
 ```julia
-@use "~/Prosca/skills/browser.jl"...
-@use "~/Prosca/skills/captcha.jl"...
+@use "~/Caesar/skills/browser.jl"...
+@use "~/Caesar/skills/captcha.jl"...
 b = Browser()
 navigate!(b, "https://example.com/signup")
 # fill in form fields...

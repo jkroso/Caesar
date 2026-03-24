@@ -1,6 +1,6 @@
 @use "." HOME run_agent default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage
 
-println("🧠 Prosca started")
+println("🧠 Caesar started")
 println("Brain: $HOME")
 println("Model: $(CONFIG["llm"])")
 println("Type 'exit' to quit.\n")
@@ -39,7 +39,7 @@ while true
   input = readline()
   input == "exit" && break
   isempty(input) && continue
-  if startswith(input, ";")
+  if startswith(input, "/") && !startswith(input, "//")
     parts = split(input, limit=2)
     cmd_name = parts[1][2:end]
     cmd_args = length(parts) > 1 ? String(strip(parts[2])) : ""

@@ -62,7 +62,7 @@ function fn(args::AbstractString)::String
 
   # No argument: show available models
   if isempty(model_name)
-    lines = ["Current: $(prosca.CONFIG["llm"])", "", "Usage: ;model <name>", "", "Available models:"]
+    lines = ["Current: $(prosca.CONFIG["llm"])", "", "Usage: /model <name>", "", "Available models:"]
     for (pname, _, _, _, models) in PROVIDERS
       push!(lines, "  $pname:")
       for m in models
@@ -74,10 +74,10 @@ function fn(args::AbstractString)::String
 
   # Handle "key:<api_key>" to set a provider key
   if startswith(model_name, "key:")
-    # ;model key:openai_key=sk-xxx
+    # /model key:openai_key=sk-xxx
     kv = model_name[5:end]
     eq = findfirst('=', kv)
-    eq === nothing && return "Usage: ;model key:<config_key>=<value>"
+    eq === nothing && return "Usage: /model key:<config_key>=<value>"
     k, v = strip(kv[1:eq-1]), strip(kv[eq+1:end])
     prosca.CONFIG[k] = v
     save_config!()
@@ -90,7 +90,7 @@ function fn(args::AbstractString)::String
   if env_var !== nothing
     existing_key = get(prosca.CONFIG, config_key, "")
     if isempty(existing_key) && !haskey(ENV, env_var)
-      return "Missing API key. Set it with: ;model key:$config_key=<your-key>"
+      return "Missing API key. Set it with: /model key:$config_key=<your-key>"
     end
   end
 

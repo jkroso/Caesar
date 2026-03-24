@@ -68,8 +68,8 @@ function submit_input!(m::ProscaModel)
   end
   clear!(m.input)
 
-  # Handle ;commands inline
-  if startswith(input_text, ";")
+  # Handle /commands inline
+  if startswith(input_text, "/") && !startswith(input_text, "//")
     parts = split(input_text, limit=2)
     cmd_name = String(parts[1][2:end])
     cmd_args = length(parts) > 1 ? String(strip(parts[2])) : ""
@@ -107,20 +107,20 @@ end
 
 function gather_completions(prefix::String)::Vector{String}
   results = String[]
-  if startswith(prefix, ";model ")
+  if startswith(prefix, "/model ")
     partial = strip(prefix[8:end])
     model_mod = get(COMMANDS, "model", nothing)
     if model_mod !== nothing && isdefined(model_mod, :PROVIDERS)
       for (_, _, _, _, models) in model_mod.PROVIDERS
         for m in models
-          startswith(m, partial) && push!(results, ";model " * m)
+          startswith(m, partial) && push!(results, "/model " * m)
         end
       end
     end
-  elseif startswith(prefix, ";") || startswith(prefix, "/")
+  elseif startswith(prefix, "/")
     partial = prefix[2:end]
     for name in keys(COMMANDS)
-      startswith(name, partial) && push!(results, ";" * name)
+      startswith(name, partial) && push!(results, "/" * name)
     end
     for name in keys(SKILLS)
       startswith(name, partial) && push!(results, "/" * name)
@@ -135,7 +135,7 @@ function dismiss_completions!(m::ProscaModel)
 end
 
 function refresh_completions!(m::ProscaModel)
-  current = String(strip(text(m.input)))
+  current = String(text(m.input))
   m.completions = gather_completions(current)
   m.completion_idx = isempty(m.completions) ? 0 : 1
 end
@@ -143,7 +143,7 @@ end
 function accept_completion!(m::ProscaModel)
   if !isempty(m.completions) && m.completion_idx > 0
     set_text!(m.input, m.completions[m.completion_idx] * " ")
-    dismiss_completions!(m)
+    refresh_completions!(m)
   end
 end
 
@@ -272,7 +272,15 @@ function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
     end
     if e.key == :enter
       if !isempty(m.completions) && m.completion_idx > 0
-        accept_completion!(m)
+        selected = m.completions[m.completion_idx]
+        current_text = strip(String(text(m.input)))
+        if current_text == selected || current_text == selected * " "
+          # Input already matches the selection — submit it
+          dismiss_completions!(m)
+          submit_input!(m)
+        else
+          accept_completion!(m)
+        end
         return
       end
       submit_input!(m)
@@ -283,8 +291,9 @@ function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
       return
     end
     handle_key!(m.input, e)
-    current = String(strip(text(m.input)))
-    if !isempty(current) && (startswith(current, ";") || startswith(current, "/"))
+    current = String(text(m.input))
+    trimmed = strip(current)
+    if !isempty(trimmed) && startswith(trimmed, "/")
       refresh_completions!(m)
     else
       !isempty(m.completions) && dismiss_completions!(m)
@@ -398,7 +407,7 @@ end
 
 function render_help!(rect::Rect, buf::Buffer)
   help_lines = [
-    "Prosca TUI - Keyboard Shortcuts",
+    "Caesar TUI - Keyboard Shortcuts",
     "",
     "  Ctrl+N      Next tab",
     "  Ctrl+P      Previous tab",
@@ -472,8 +481,13 @@ end
 
 enable_markdown()
 
+# Redirect stderr to the agent's REPL log so warnings don't corrupt the TUI
+let agent = first(values(AGENTS))
+  redirect_stderr(agent.repl_log)
+end
+
 let model = ProscaModel()
-  push_chat!(model, "Prosca started", tstyle(:success, bold=true))
+  push_chat!(model, "Caesar started", tstyle(:success, bold=true))
   push_chat!(model, "Brain: $HOME", tstyle(:text_dim))
   push_chat!(model, "Model: $(get(CONFIG, "llm", "not configured"))", tstyle(:text_dim))
   push_chat!(model, "Agents: $(join(keys(AGENTS), ", "))", tstyle(:text_dim))

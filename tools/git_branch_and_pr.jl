@@ -22,7 +22,7 @@ function fn(args)::String
   api_url = "https://api.github.com/repos/$repo_name/pulls"
   body = prosca.JSON3.write(Dict(
     "title" => "prosca: $task",
-    "body" => "Automated by Prosca.\n\n**Summary:** $changes_summary\n\n**Branch:** $branch_name",
+    "body" => "Automated by Caesar.\n\n**Summary:** $changes_summary\n\n**Branch:** $branch_name",
     "head" => branch_name,
     "base" => prosca.LibGit2.headname(repo)
   ))

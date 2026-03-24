@@ -13,9 +13,9 @@ const API_KEY_CACHE = Ref{String}("")
 
 function capsolver_key()
   isempty(API_KEY_CACHE[]) || return API_KEY_CACHE[]
-  cfg = YAML.load_file(joinpath(homedir(), "Prosca", "config.yaml"))
+  cfg = YAML.load_file(joinpath(homedir(), "Caesar", "config.yaml"))
   key = get(cfg, "capsolver_key", nothing)
-  key === nothing && error("Set capsolver_key in ~/Prosca/config.yaml")
+  key === nothing && error("Set capsolver_key in ~/Caesar/config.yaml")
   API_KEY_CACHE[] = string(key)
 end
 

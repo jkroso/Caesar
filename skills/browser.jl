@@ -9,7 +9,7 @@
 @use "github.com/jkroso/Prospects.jl" @property
 
 const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-const DATA_DIR = joinpath(homedir(), "Prosca", "browser-data")
+const DATA_DIR = joinpath(homedir(), "Caesar", "browser-data")
 
 # ── Browser ──────────────────────────────────────────────────────────
 
