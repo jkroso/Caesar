@@ -53,3 +53,7 @@ reply = need(promise)
 ```
 
 Agents on disk (`agents/<id>/` with `soul.md` and `instructions.md`) are loaded automatically on startup by `load_agents!()`. `create_agent!("name", "description")` scaffolds the directory and uses the LLM to generate the personality and instructions.
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/caesar)
