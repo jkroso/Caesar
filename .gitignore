@@ -6,3 +6,5 @@ personal
 browser-data/
 Project.toml
 agents/*/login/
+Manifest.toml
+Project.toml
