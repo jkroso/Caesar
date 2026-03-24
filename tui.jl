@@ -91,7 +91,7 @@ function submit_input!(m::ProscaModel)
   push_chat!(m, "You: ", tstyle(:accent, bold=true), input_text, tstyle(:text))
   m.agent_busy = true
   agent = default_agent()
-  @async run_agent(input_text, m.outbox, m.inbox, agent)
+  @async run_agent(input_text, agent; outbox=m.outbox, inbox=m.inbox)
 end
 
 function handle_tool_approval!(m::ProscaModel, decision::Symbol)

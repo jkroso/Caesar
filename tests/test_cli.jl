@@ -76,17 +76,17 @@ end
   # This is a static check — we parse main.jl for the function signature
   main_src = read(joinpath(@__DIR__, "..", "main.jl"), String)
 
-  # The function signature should require 4 positional args
-  # function run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent; ...)
+  # The function signature should require 2 positional args: user_input and agent
+  # function run_agent(user_input::String, agent::Agent; ...)
   @test occursin(r"function run_agent\([^)]*agent::Agent", main_src)
 
-  # cli.jl should pass an agent — check that it does (will fail until fixed)
+  # cli.jl should pass an agent — check that it does
   cli_src = read(joinpath(@__DIR__, "..", "cli.jl"), String)
   call_match = match(r"run_agent\(([^)]+)\)", cli_src)
   @test call_match !== nothing
   args = split(call_match.captures[1], ",")
-  # run_agent needs at least 4 positional args: input, outbox, inbox, agent
-  @test length(args) >= 4  # FAILS: cli.jl only passes 3
+  # run_agent needs 2 positional args: input, agent
+  @test length(args) >= 2
 end
 
 @testset "channel flow — agent task puts AgentDone on error" begin

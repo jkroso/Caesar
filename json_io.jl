@@ -23,16 +23,16 @@ const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 mutable struct GUIConversation
   history::Vector{PromptingTools.AbstractMessage}
   auto_allowed::Set{String}
+  agent_id::String
   outbox::Channel
   inbox::Channel
-  agent_id::String
 end
 
 const GUI_CONVERSATIONS = Dict{String, GUIConversation}()
 
 function get_gui_conversation(id::String, agent_id::String="prosca")
   get!(GUI_CONVERSATIONS, id) do
-    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), Channel(32), Channel(32), agent_id)
+    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), agent_id, Channel(32), Channel(32))
   end
 end
 
@@ -847,11 +847,13 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
 
     TELEGRAM_ACTIVE_CONVERSATIONS[topic] = true
     conv = get_gui_conversation(conv_id)
+    outbox = Channel(32)
+    inbox = Channel(32)
     @async begin
         lock(AGENT_LOCK)
         try
             agent = get(AGENTS, conv.agent_id, default_agent())
-            run_agent(text, conv.outbox, conv.inbox, agent;
+            run_agent(text, agent; outbox, inbox,
                       session_history=conv.history, auto_allowed=conv.auto_allowed,
                       conversation_id=conv_id)
         finally
@@ -863,7 +865,7 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
         adapter = primary_adapter(ROUTER)
         adapter === nothing && return
         while true
-            event = take!(conv.outbox)
+            event = take!(outbox)
             if event isa AgentMessage
                 try
                     out = OutboundEnvelope{:telegram}(event.text, env.topic_id)
@@ -873,7 +875,7 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
                 end
             elseif event isa ToolCallRequest
                 # Route through presence router
-                @async route_approval(ROUTER, event, conv.inbox; conversation_id=conv_id)
+                @async route_approval(ROUTER, event, inbox; conversation_id=conv_id)
             elseif event isa ToolResult
                 # Tool results not sent to Telegram (too noisy)
             elseif event isa AgentDone
@@ -954,7 +956,7 @@ while !eof(stdin)
       @async begin
         lock(AGENT_LOCK)
         try
-          run_agent(text, conv.outbox, conv.inbox, agent;
+          run_agent(text, agent; outbox=conv.outbox, inbox=conv.inbox,
                     session_history=conv.history, auto_allowed=conv.auto_allowed,
                     conversation_id=conv_id)
         finally

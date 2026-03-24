@@ -8,7 +8,7 @@ println("Type 'exit' to quit.\n")
 const outbox = Channel(32)
 const inbox = Channel(32)
 
-function handle_events(outbox::Channel)
+function handle_events()
   while true
     event = take!(outbox)
     if event isa AgentMessage
@@ -55,7 +55,7 @@ while true
       println("Available: $(join(keys(COMMANDS), ", "))")
     end
   else
-    @async run_agent(input, outbox, inbox, default_agent())
-    handle_events(outbox)
+    @async run_agent(input, default_agent(); outbox, inbox)
+    handle_events()
   end
 end

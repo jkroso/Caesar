@@ -27,3 +27,29 @@ Using Julia instead of Bash for tool calls means smaller contexts, fewer tokens,
 2. Clone this repo
 3. Run `julia tui.jl` for the TUI or `julia cli.jl` for the CLI
 4. Configuration lives in `~/Caesar/config.yaml` (created on first run)
+
+## Creating an Agent
+
+```julia
+agent = Agent("Pliny", "You are a concise research assistant.", "Summarize papers. Cite sources.")
+```
+
+Only `id`, `personality`, and `instructions` are required — the rest have defaults:
+
+| Keyword | Default |
+|---------|---------|
+| `skills` | `Dict{String, Skill}()` |
+| `path` | `HOME * "agents" * id` |
+| `repl_module` | `Module(Symbol("agent_$id"))` |
+| `repl_log` | opens `agents/<id>/repl.log` |
+| `config` | `Dict{String, Any}()` |
+
+Then talk to it:
+
+```julia
+promise = message(agent, "Summarize the latest paper on transformer architectures")
+# do other work...
+reply = need(promise)
+```
+
+Agents on disk (`agents/<id>/` with `soul.md` and `instructions.md`) are loaded automatically on startup by `load_agents!()`. `create_agent!("name", "description")` scaffolds the directory and uses the LLM to generate the personality and instructions.

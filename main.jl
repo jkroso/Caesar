@@ -1,4 +1,5 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
+@use "github.com/jkroso/Promises.jl" @thread
 @use LinearAlgebra...
 @use PromptingTools
 @use LibGit2
@@ -620,6 +621,15 @@ struct Agent
   config::Dict{String, Any}
 end
 
+function Agent(id::String, personality::String, instructions::String;
+               skills::Dict{String, Skill}=Dict{String, Skill}(),
+               path::FSPath=HOME*"agents"*id,
+               repl_module::Module=Module(Symbol("agent_$id")),
+               repl_log::IOStream=open(string(HOME*"agents"*id*"repl.log"), "w"),
+               config::Dict{String, Any}=Dict{String, Any}())
+  Agent(id, personality, instructions, skills, path, repl_module, repl_log, config)
+end
+
 const AGENTS = Dict{String, Agent}()
 const AGENTS_DIR = HOME*"agents"
 
@@ -852,11 +862,30 @@ end
 
 # ── ReAct Agent Loop ─────────────────────────────────────────────────
 
-function run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent;
+function message(agent::Agent, text::String)
+  outbox = Channel(32)
+  inbox = Channel(32)
+  reply = Ref("")
+  drainer = @async begin
+    while true
+      event = take!(outbox)
+      event isa AgentMessage && (reply[] = event.text)
+      event isa AgentDone && break
+    end
+  end
+  @thread begin
+    run_agent(text, agent; outbox, inbox)
+    wait(drainer)
+    reply[]
+  end
+end
+
+function run_agent(user_input::String, agent::Agent;
+                   outbox::Channel, inbox::Channel,
                    session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
                    conversation_id::Union{String,Nothing}=nothing)
   try
-    _run_agent(user_input, outbox, inbox, agent; session_history, auto_allowed, conversation_id)
+    _run_agent(user_input, agent; outbox, inbox, session_history, auto_allowed, conversation_id)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -864,7 +893,8 @@ function run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::A
   end
 end
 
-function _run_agent(user_input::String, outbox::Channel, inbox::Channel, agent::Agent;
+function _run_agent(user_input::String, agent::Agent;
+                    outbox::Channel, inbox::Channel,
                     session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
                     conversation_id::Union{String,Nothing}=nothing)
   log_memory("User: $user_input"; role="User", agent_id=agent.id, conversation_id)
