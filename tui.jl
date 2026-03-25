@@ -9,8 +9,8 @@
 # ── Model ─────────────────────────────────────────────────────────────
 
 @kwdef mutable struct ProscaModel <: Model
-  outbox::Channel       = Channel(32)
-  inbox::Channel        = Channel(32)
+  outbox::Union{Nothing, Channel}  = nothing    # current message's outbox
+  approvals::Union{Nothing, Channel} = nothing  # current message's approvals channel
   active_tab::Int       = 1               # 1=Chat, 2=Help, 3=Skills, 4=Agents
   input::TextInput      = TextInput(; label="You: ", focused=true, tick=0)
   messages::Vector{Vector{Span}} = Vector{Span}[]
@@ -90,14 +90,16 @@ function submit_input!(m::ProscaModel)
 
   push_chat!(m, "You: ", tstyle(:accent, bold=true), input_text, tstyle(:text))
   m.agent_busy = true
+  m.outbox = Channel(32)
+  m.approvals = Channel(32)
   agent = default_agent()
-  @async run_agent(input_text, agent; outbox=m.outbox, inbox=m.inbox)
+  put!(agent.inbox, Envelope(input_text; outbox=m.outbox, approvals=m.approvals))
 end
 
 function handle_tool_approval!(m::ProscaModel, decision::Symbol)
   req = m.pending_tool
   req === nothing && return
-  put!(m.inbox, ToolApproval(req.id, decision))
+  put!(m.approvals, ToolApproval(req.id, decision))
   label = decision == :allow ? "Allowed" : decision == :always ? "Always" : "Denied"
   push_chat!(m, "  [$label]", tstyle(decision == :deny ? :error : :success, bold=true))
   m.pending_tool = nothing
@@ -192,6 +194,7 @@ end
 # ── Poll agent channel events ─────────────────────────────────────────
 
 function drain_agent_events!(m::ProscaModel)
+  m.outbox === nothing && return
   while isready(m.outbox)
     event = take!(m.outbox)
     if event isa AgentMessage

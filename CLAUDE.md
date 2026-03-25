@@ -42,7 +42,7 @@ The `...` suffix means "import all exports." Kip auto-downloads GitHub dependenc
 
 ### Core Loop (`main.jl`)
 
-The ReAct agent loop in `run_agent` / `_run_agent`:
+The ReAct agent loop in `process_message` / `_process_message`:
 1. Builds a system prompt (personality + instructions + tool schemas + skill catalog + memory)
 2. Sends message history to the LLM via `call_llm` (wraps `PromptingTools.aigenerate`)
 3. Parses the JSON response and dispatches:

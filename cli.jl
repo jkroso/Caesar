@@ -1,14 +1,11 @@
-@use "." HOME run_agent default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage
+@use "." HOME default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage Envelope SESSION_HISTORY AUTO_ALLOWED_TOOLS
 
 println("🧠 Caesar started")
 println("Brain: $HOME")
 println("Model: $(CONFIG["llm"])")
 println("Type 'exit' to quit.\n")
 
-const outbox = Channel(32)
-const inbox = Channel(32)
-
-function handle_events()
+function handle_events(outbox, approvals)
   while true
     event = take!(outbox)
     if event isa AgentMessage
@@ -25,7 +22,7 @@ function handle_events()
       else
         :deny
       end
-      put!(inbox, ToolApproval(event.id, decision))
+      put!(approvals, ToolApproval(event.id, decision))
     elseif event isa ToolResult
       # Tool result already logged in main.jl
     elseif event isa AgentDone
@@ -55,7 +52,9 @@ while true
       println("Available: $(join(keys(COMMANDS), ", "))")
     end
   else
-    @async run_agent(input, default_agent(); outbox, inbox)
-    handle_events()
+    outbox = Channel(32)
+    approvals = Channel(32)
+    put!(default_agent().inbox, Envelope(input; outbox, approvals))
+    handle_events(outbox, approvals)
   end
 end

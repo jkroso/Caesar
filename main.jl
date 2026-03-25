@@ -34,7 +34,7 @@ const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
 const ORI_LOCKS = Dict{String, ReentrantLock}()
 ori_lock(agent_id) = get!(() -> ReentrantLock(), ORI_LOCKS, agent_id)
 
-# Agent → Interface events
+# Agent → Interface events (per-message outbox)
 struct AgentMessage
   text::String
 end
@@ -52,7 +52,7 @@ end
 
 struct AgentDone end
 
-# Interface → Agent events
+# Interface → Agent events (per-message approvals channel)
 struct UserInput
   text::String
 end
@@ -610,6 +610,25 @@ function load_skills!()
 end
 
 # ── Agents ───────────────────────────────────────────────────────────
+
+struct Envelope
+  text::String
+  outbox::Channel
+  approvals::Channel
+  session_history::Vector
+  auto_allowed::Set{String}
+  conversation_id::Union{String,Nothing}
+end
+
+function Envelope(text::String;
+                  outbox::Channel=Channel(32),
+                  approvals::Channel=Channel(32),
+                  session_history::Vector=SESSION_HISTORY,
+                  auto_allowed::Set{String}=AUTO_ALLOWED_TOOLS,
+                  conversation_id::Union{String,Nothing}=nothing)
+  Envelope(text, outbox, approvals, session_history, auto_allowed, conversation_id)
+end
+
 struct Agent
   id::String
   personality::String
@@ -619,6 +638,7 @@ struct Agent
   repl_module::Module
   repl_log::IOStream
   config::Dict{String, Any}
+  inbox::Channel
 end
 
 function Agent(id::String, personality::String, instructions::String;
@@ -626,8 +646,23 @@ function Agent(id::String, personality::String, instructions::String;
                path::FSPath=HOME*"agents"*id,
                repl_module::Module=Module(Symbol("agent_$id")),
                repl_log::IOStream=open(string(HOME*"agents"*id*"repl.log"), "w"),
-               config::Dict{String, Any}=Dict{String, Any}())
-  Agent(id, personality, instructions, skills, path, repl_module, repl_log, config)
+               config::Dict{String, Any}=Dict{String, Any}(),
+               inbox::Channel=Channel(Inf))
+  agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, inbox)
+  start!(agent)
+  agent
+end
+
+"Spawn the agent's sequential message-processing loop"
+function start!(agent::Agent)
+  @async for envelope in agent.inbox
+    process_message(envelope.text, agent;
+              outbox=envelope.outbox, inbox=envelope.approvals,
+              session_history=envelope.session_history,
+              auto_allowed=envelope.auto_allowed,
+              conversation_id=envelope.conversation_id)
+  end
+  agent
 end
 
 const AGENTS = Dict{String, Agent}()
@@ -661,8 +696,8 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
     Dict{String, Any}()
   end
   config isa Dict || (config = Dict{String, Any}())
-  Agent(id, read(soul_path, String), read(instr_path, String),
-        load_agent_skills(agent_dir), agent_dir, mod, logfile, config)
+  Agent(id, read(soul_path, String), read(instr_path, String);
+        skills=load_agent_skills(agent_dir), path=agent_dir, repl_module=mod, repl_log=logfile, config)
 end
 
 function load_agents!()
@@ -864,7 +899,7 @@ end
 
 function message(agent::Agent, text::String)
   outbox = Channel(32)
-  inbox = Channel(32)
+  approvals = Channel(32)
   reply = Ref("")
   drainer = @async begin
     while true
@@ -873,19 +908,19 @@ function message(agent::Agent, text::String)
       event isa AgentDone && break
     end
   end
+  put!(agent.inbox, Envelope(text; outbox, approvals))
   @thread begin
-    run_agent(text, agent; outbox, inbox)
     wait(drainer)
     reply[]
   end
 end
 
-function run_agent(user_input::String, agent::Agent;
-                   outbox::Channel, inbox::Channel,
-                   session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
-                   conversation_id::Union{String,Nothing}=nothing)
+function process_message(user_input::String, agent::Agent;
+                         outbox::Channel, inbox::Channel,
+                         session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
+                         conversation_id::Union{String,Nothing}=nothing)
   try
-    _run_agent(user_input, agent; outbox, inbox, session_history, auto_allowed, conversation_id)
+    _process_message(user_input, agent; outbox, inbox, session_history, auto_allowed, conversation_id)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -893,7 +928,7 @@ function run_agent(user_input::String, agent::Agent;
   end
 end
 
-function _run_agent(user_input::String, agent::Agent;
+function _process_message(user_input::String, agent::Agent;
                     outbox::Channel, inbox::Channel,
                     session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
                     conversation_id::Union{String,Nothing}=nothing)

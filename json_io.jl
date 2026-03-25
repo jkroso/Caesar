@@ -17,24 +17,24 @@
 @use YAML
 @use UUIDs
 
-const AGENT_LOCK = ReentrantLock()
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
 mutable struct GUIConversation
   history::Vector{PromptingTools.AbstractMessage}
   auto_allowed::Set{String}
   agent_id::String
-  outbox::Channel
-  inbox::Channel
 end
 
 const GUI_CONVERSATIONS = Dict{String, GUIConversation}()
 
 function get_gui_conversation(id::String, agent_id::String="prosca")
   get!(GUI_CONVERSATIONS, id) do
-    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), agent_id, Channel(32), Channel(32))
+    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), agent_id)
   end
 end
+
+# Map tool-call ID → per-message approvals channel (for direct GUI approvals without gateway)
+const PENDING_GUI_APPROVALS = Dict{UInt64, Channel}()
 
 # ── Output helpers ────────────────────────────────────────────────────
 
@@ -48,22 +48,16 @@ end
 
 # ── Drain agent events and emit as JSON ──────────────────────────────
 
-function _current_inbox(conversation_id::Union{String,Nothing})
-    cid = conversation_id === nothing ? "default" : conversation_id
-    get_gui_conversation(cid).inbox
-end
-
-function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=nothing)
+function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=nothing, approvals::Channel)
   while true
     event = take!(outbox)
     if event isa AgentMessage
       emit(Dict("type" => "agent_message", "text" => event.text); conversation_id)
     elseif event isa ToolCallRequest
       if !isempty(ROUTER.active_adapters)
-        # Route through presence router (handles GUI vs Telegram)
-        @async route_approval(ROUTER, event, _current_inbox(conversation_id); conversation_id)
+        @async route_approval(ROUTER, event, approvals; conversation_id)
       else
-        # No gateway configured — direct to GUI as before
+        PENDING_GUI_APPROVALS[event.id] = approvals
         emit(Dict("type" => "tool_call_request", "id" => string(event.id), "name" => event.name, "args" => event.args); conversation_id)
       end
     elseif event isa ToolResult
@@ -267,7 +261,7 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
       push!(history, PromptingTools.AIMessage(text))
     end
   end
-  # Keep only the last 20 entries (10 exchange pairs) like _run_agent does
+  # Keep only the last 20 entries (10 exchange pairs) like _process_message does
   if length(history) > 20
     splice!(history, 1:length(history)-20)
   end
@@ -631,14 +625,10 @@ end
 # ── Scheduler ─────────────────────────────────────────────────────────
 
 function scheduler_tick!()
-  # Only run if agent is idle
-  trylock(AGENT_LOCK) || return
   try
     _scheduler_tick!()
   catch e
     @error "Scheduler tick error" exception=(e, catch_backtrace())
-  finally
-    unlock(AGENT_LOCK)
   end
 end
 
@@ -848,18 +838,9 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
     TELEGRAM_ACTIVE_CONVERSATIONS[topic] = true
     conv = get_gui_conversation(conv_id)
     outbox = Channel(32)
-    inbox = Channel(32)
-    @async begin
-        lock(AGENT_LOCK)
-        try
-            agent = get(AGENTS, conv.agent_id, default_agent())
-            run_agent(text, agent; outbox, inbox,
-                      session_history=conv.history, auto_allowed=conv.auto_allowed,
-                      conversation_id=conv_id)
-        finally
-            unlock(AGENT_LOCK)
-        end
-    end
+    approvals = Channel(32)
+    agent = get(AGENTS, conv.agent_id, default_agent())
+    put!(agent.inbox, Envelope(text; outbox, approvals, session_history=conv.history, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
     # Drain agent events and send back to Telegram
     @async begin
         adapter = primary_adapter(ROUTER)
@@ -874,8 +855,7 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
                     @warn "Failed to send agent response to Telegram" exception=e
                 end
             elseif event isa ToolCallRequest
-                # Route through presence router
-                @async route_approval(ROUTER, event, inbox; conversation_id=conv_id)
+                @async route_approval(ROUTER, event, approvals; conversation_id=conv_id)
             elseif event isa ToolResult
                 # Tool results not sent to Telegram (too noisy)
             elseif event isa AgentDone
@@ -953,17 +933,10 @@ while !eof(stdin)
       last_user_activity_at[] = now(Dates.UTC)
       agent = get(AGENTS, agent_id, default_agent())
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
-      @async begin
-        lock(AGENT_LOCK)
-        try
-          run_agent(text, agent; outbox=conv.outbox, inbox=conv.inbox,
-                    session_history=conv.history, auto_allowed=conv.auto_allowed,
-                    conversation_id=conv_id)
-        finally
-          unlock(AGENT_LOCK)
-        end
-      end
-      @async handle_events(conv.outbox; conversation_id=conv_id)
+      outbox = Channel(32)
+      approvals = Channel(32)
+      put!(agent.inbox, Envelope(text; outbox, approvals, session_history=conv.history, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
+      @async handle_events(outbox; conversation_id=conv_id, approvals)
     elseif msg_type == "tool_approval"
       id = parse(UInt64, string(get(msg, :id, "0")))
       decision_str = string(get(msg, :decision, "deny"))
@@ -975,12 +948,10 @@ while !eof(stdin)
         :deny
       end
       if !isempty(ROUTER.active_adapters)
-        # Route through router (checks ownership, handles retraction race)
         resolve_approval(ROUTER, id, decision, :gui)
-      else
-        # No gateway — direct as before
-        conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id)
-        put!(conv.inbox, ToolApproval(id, decision))
+      elseif haskey(PENDING_GUI_APPROVALS, id)
+        put!(PENDING_GUI_APPROVALS[id], ToolApproval(id, decision))
+        delete!(PENDING_GUI_APPROVALS, id)
       end
     elseif msg_type == "config_get"
       handle_config_get()

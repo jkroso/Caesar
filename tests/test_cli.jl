@@ -1,4 +1,4 @@
-# tests/test_cli.jl — Tests for CLI event loop, run_agent wiring, and JSON parsing
+# tests/test_cli.jl — Tests for CLI event loop, envelope wiring, and JSON parsing
 
 using Test
 using JSON3
@@ -58,8 +58,8 @@ end
   outbox = Channel(8)
 
   # Simulate what cli.jl does: @async a function that will throw MethodError
-  fake_run_agent(a::String, b::Channel, c::Channel, d::Int) = put!(b, AgentDone())
-  @async fake_run_agent("hi", outbox, Channel(1))  # missing 4th arg → MethodError
+  fake_handler(a::String, b::Channel, c::Channel, d::Int) = put!(b, AgentDone())
+  @async fake_handler("hi", outbox, Channel(1))  # missing 4th arg → MethodError
 
   task = @async handle_events(outbox)
   sleep(0.2)
@@ -71,22 +71,13 @@ end
   @test istaskdone(task)
 end
 
-@testset "run_agent signature requires agent argument" begin
-  # Verify that the actual run_agent function cannot be called with just 3 positional args
-  # This is a static check — we parse main.jl for the function signature
-  main_src = read(joinpath(@__DIR__, "..", "main.jl"), String)
-
-  # The function signature should require 2 positional args: user_input and agent
-  # function run_agent(user_input::String, agent::Agent; ...)
-  @test occursin(r"function run_agent\([^)]*agent::Agent", main_src)
-
-  # cli.jl should pass an agent — check that it does
+@testset "cli sends envelopes to agent inbox" begin
   cli_src = read(joinpath(@__DIR__, "..", "cli.jl"), String)
-  call_match = match(r"run_agent\(([^)]+)\)", cli_src)
-  @test call_match !== nothing
-  args = split(call_match.captures[1], ",")
-  # run_agent needs 2 positional args: input, agent
-  @test length(args) >= 2
+  # CLI should push Envelopes into agent.inbox instead of calling process_message directly
+  @test occursin("agent.inbox", cli_src) || occursin("default_agent().inbox", cli_src)
+  @test occursin("Envelope", cli_src)
+  # process_message should NOT be called directly from the CLI
+  @test !occursin(r"process_message\(", cli_src)
 end
 
 @testset "channel flow — agent task puts AgentDone on error" begin
