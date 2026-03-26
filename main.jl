@@ -1,12 +1,13 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use LinearAlgebra...
-@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama TokenStream
+@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
 @use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
 @use Logging
 @use SQLite
-@use JSON3
+@use "github.com/jkroso/JSON.jl" parse_json
+@use "github.com/jkroso/JSON.jl/write" json
 @use Dates
 @use HTTP
 @use YAML
@@ -287,26 +288,29 @@ end
 struct SystemMessage; content::String end
 struct UserMessage; content::String end
 struct AIMessage; content::String end
-const AbstractMessage = Union{SystemMessage, UserMessage, AIMessage}
+struct ToolResultMessage; content::String end
+const AbstractMessage = Union{SystemMessage, UserMessage, AIMessage, ToolResultMessage}
 
 "Flatten a message vector into (system, user) for the LLM callable"
-function flatten_messages(messages::Vector{<:AbstractMessage})
+function flatten_messages(messages::Vector)
   system = ""
   parts = String[]
   for m in messages
     if m isa SystemMessage
       system = m.content
     elseif m isa UserMessage
-      push!(parts, m.content)
+      push!(parts, "[user]\n$(m.content)")
     elseif m isa AIMessage
-      push!(parts, "Assistant: $(m.content)")
+      push!(parts, "[assistant]\n$(m.content)")
+    elseif m isa ToolResultMessage
+      push!(parts, "[tool_result]\n$(m.content)")
     end
   end
   (system, join(parts, "\n\n"))
 end
 
 "Send messages to the default LLM and return the full response text"
-function llm_generate(messages::Vector{<:AbstractMessage}; model::Union{String,Nothing}=nothing)::String
+function llm_generate(messages::Vector; model::Union{String,Nothing}=nothing)::String
   llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)
   system, user = flatten_messages(messages)
   read(llm(system, user), String)
@@ -388,20 +392,20 @@ Return ONLY a JSON array, no other text."""
 
   extraction_model = get(CONFIG, "extraction_model", nothing)
   response = try
-    msgs = [SystemMessage(prompt), UserMessage(conversation)]
-    llm_generate(msgs; model=extraction_model)
+    llm_generate(AbstractMessage[SystemMessage(prompt), UserMessage(conversation)]; model=extraction_model)
   catch e
     @warn "Knowledge extraction LLM call failed" exception=e
     return
   end
 
   notes_data = try
-    JSON3.read(response, Vector{Dict{String, Any}})
+    parse_json(response)
   catch
     m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, response)
     m === nothing && (@warn "Extraction returned invalid JSON"; return)
-    try JSON3.read(m.captures[1], Vector{Dict{String, Any}}) catch; @warn "Extraction JSON parse failed"; return end
+    try parse_json(m.captures[1]) catch; @warn "Extraction JSON parse failed"; return end
   end
+  notes_data isa Vector || (@warn "Extraction returned non-array JSON"; return)
 
   isempty(notes_data) && return
 
@@ -849,6 +853,11 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   $(join(TOOL_SCHEMAS, "\n"))
   $skill_list
   Or {"final_answer": "your response here"}
+
+  ## Conversation format
+  The conversation history uses [user], [assistant], and [tool_result] markers to delimit turns.
+  Your previous responses appear after [assistant]. Tool/eval results appear after [tool_result].
+  Always respond as yourself — never generate these markers.
   $skill_injection$handoff_section
   """
 end
@@ -929,6 +938,9 @@ function _process_message(user_input::String, agent::Agent;
     response_text = try
       temperature = get(CONFIG, "temperature", 0.7)
       system, user = flatten_messages(messages)
+      open(string(agent.path * "last_prompt.md"), "w") do io
+        println(io, "# System\n\n", system, "\n\n# User\n\n", user)
+      end
       stream = agent.llm(system, user; temperature)
       buf = IOBuffer()
       while !eof(stream)
@@ -958,22 +970,20 @@ function _process_message(user_input::String, agent::Agent;
     end
 
     parsed = try
-      result = JSON3.read(json_str)
+      result = parse_json(json_str)
       result isa AbstractDict ? result : nothing
     catch
-      # Try extracting just the first JSON object (LLM may concatenate multiple)
-      first_obj = match(r"\{(?:[^{}]|\{[^{}]*\})*\}", json_str)
-      if first_obj !== nothing
-        try
-          result = JSON3.read(first_obj.match)
-          result isa AbstractDict ? result : nothing
-        catch
-          nothing
-        end
-      else
+      # LLMs often produce unescaped newlines inside JSON strings — fix them
+      fixed = replace(json_str, r"(?<!\\)\n" => "\\n")
+      try
+        result = parse_json(fixed)
+        result isa AbstractDict ? result : nothing
+      catch
         nothing
       end
     end
+
+    clean_json = parsed !== nothing ? json(parsed) : json_str
 
     if parsed === nothing
       looks_like_json = contains(response_text, "\"tool\"") && contains(response_text, "\"args\"") ||
@@ -983,46 +993,49 @@ function _process_message(user_input::String, agent::Agent;
                         contains(response_text, "\"skill\"") ||
                         contains(response_text, "\"handoff\"")
       if looks_like_json
-        push!(messages, AIMessage(response_text))
+        push!(messages, AIMessage(clean_json))
         push!(messages, UserMessage("Your JSON was malformed and couldn't be parsed. Return exactly ONE JSON object per response. Try again."))
         @warn "Malformed JSON from LLM, asking to retry" response_text
         continue
       end
       put!(outbox, AgentMessage(response_text))
       log_memory("Agent: $response_text"; agent_id=agent.id, conversation_id)
+      push!(messages, AIMessage(response_text))
       break
     end
 
-    if haskey(parsed, :final_answer)
-      put!(outbox, AgentMessage(parsed.final_answer))
-      log_memory("Agent: $(parsed.final_answer)"; agent_id=agent.id, conversation_id)
+    if haskey(parsed, "final_answer")
+      put!(outbox, AgentMessage(parsed["final_answer"]))
+      log_memory("Agent: $(parsed["final_answer"])"; agent_id=agent.id, conversation_id)
+      push!(messages, AIMessage(parsed["final_answer"]))
       break
     end
 
-    if haskey(parsed, :skill)
-      sn = string(parsed.skill)
+    if haskey(parsed, "skill")
+      sn = string(parsed["skill"])
       all_skills = merged_skills(agent)
       if haskey(all_skills, sn)
         active_skill = all_skills[sn]
         @info "LLM activated skill: $sn"
         messages[1] = SystemMessage(build_system_prompt(agent; active_skill))
-        push!(messages, AIMessage(response_text))
+        push!(messages, AIMessage(clean_json))
         push!(messages, UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
         continue
       else
-        push!(messages, AIMessage(response_text))
+        push!(messages, AIMessage(clean_json))
         push!(messages, UserMessage("Unknown skill '$sn'. Available: $(join(keys(all_skills), ", "))"))
         continue
       end
     end
 
-    if haskey(parsed, :handoff)
-      to_agent_id = string(get(parsed.handoff, :to_agent, ""))
-      reason = string(get(parsed.handoff, :reason, ""))
-      context_summary = string(get(parsed.handoff, :context, ""))
+    if haskey(parsed, "handoff")
+      handoff = parsed["handoff"]
+      to_agent_id = string(get(handoff, "to_agent", ""))
+      reason = string(get(handoff, "reason", ""))
+      context_summary = string(get(handoff, "context", ""))
 
       if !haskey(AGENTS, to_agent_id)
-        push!(messages, AIMessage(response_text))
+        push!(messages, AIMessage(clean_json))
         available = join([a.id for a in values(AGENTS) if a.id != agent.id], ", ")
         push!(messages, UserMessage("Unknown agent '$to_agent_id'. Available agents: $available"))
         continue
@@ -1047,8 +1060,8 @@ function _process_message(user_input::String, agent::Agent;
       break
     end
 
-    if haskey(parsed, :eval)
-      code = string(parsed.eval)
+    if haskey(parsed, "eval")
+      code = string(parsed["eval"])
       result = try
         cd(string(agent.path)) do
           interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
@@ -1058,13 +1071,13 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("eval", result))
       log_memory("Eval: $code → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(response_text))
-      push!(messages, UserMessage("Result: $result"))
+      push!(messages, AIMessage(clean_json))
+      push!(messages, ToolResultMessage(result))
       continue
     end
 
-    if haskey(parsed, :js)
-      js_code = string(parsed.js)
+    if haskey(parsed, "js")
+      js_code = string(parsed["js"])
       code = "js(b, $(repr(js_code)))"
       result = try
         cd(string(agent.path)) do
@@ -1075,12 +1088,12 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("js", result))
       log_memory("JS: $(first(js_code, 200)) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(response_text))
-      push!(messages, UserMessage("Result: $result"))
+      push!(messages, AIMessage(clean_json))
+      push!(messages, ToolResultMessage(result))
       continue
     end
 
-    if get(parsed, :index_page, nothing) == true
+    if get(parsed, "index_page", nothing) == true
       code = "index_page(b)"
       result = try
         cd(string(agent.path)) do
@@ -1091,17 +1104,17 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("index_page", result))
       log_memory("State: $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(response_text))
-      push!(messages, UserMessage("Result: $result"))
+      push!(messages, AIMessage(clean_json))
+      push!(messages, ToolResultMessage(result))
       continue
     end
 
-    tool_name = get(parsed, :tool, nothing)
+    tool_name = get(parsed, "tool", nothing)
     tn = tool_name === nothing ? "" : string(tool_name)
-    args_str = haskey(parsed, :args) ? JSON3.write(parsed.args) : "{}"
+    args_str = haskey(parsed, "args") ? json(parsed["args"]) : "{}"
 
     if !haskey(TOOLS, tn)
-      push!(messages, AIMessage(response_text))
+      push!(messages, AIMessage(clean_json))
       push!(messages, UserMessage("Error: Unknown tool '$tn'. Use {\"eval\": \"...\"} for Julia code, or use a valid tool name, or return {\"final_answer\": \"...\"}"))
       continue
     end
@@ -1116,7 +1129,7 @@ function _process_message(user_input::String, agent::Agent;
         if approval.decision == :always
           push!(auto_allowed, tn)
         elseif approval.decision == :deny
-          push!(messages, AIMessage(response_text))
+          push!(messages, AIMessage(clean_json))
           push!(messages, UserMessage("Tool call to '$tn' was denied by user. Try a different approach or ask the user."))
           continue
         end
@@ -1124,7 +1137,7 @@ function _process_message(user_input::String, agent::Agent;
     end
 
     result = try
-      TOOLS[tn](parsed.args)
+      TOOLS[tn](parsed["args"])
     catch e
       "Tool error ($(typeof(e))): $(sprint(showerror, e))"
     end
@@ -1132,8 +1145,8 @@ function _process_message(user_input::String, agent::Agent;
     put!(outbox, ToolResult(tn, result))
     log_memory("Tool: $tn($args_str) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
 
-    push!(messages, AIMessage(response_text))
-    push!(messages, UserMessage("Tool result: $result"))
+    push!(messages, AIMessage(clean_json))
+    push!(messages, ToolResultMessage(result))
     step == max_steps && (hit_limit = true)
   end
 
@@ -1340,7 +1353,7 @@ function __init__()
   end
 
   # Trust modules that the agent's skills depend on
-  for mod in [HTTP, JSON3, Base64]
+  for mod in [HTTP, Base64]
     push!(TRUSTED_MODULES, mod)
   end
 

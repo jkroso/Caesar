@@ -6,5 +6,6 @@ personal
 browser-data/
 Project.toml
 agents/*/login/
+agents/*/last_prompt.md
 Manifest.toml
 Project.toml

@@ -42,7 +42,7 @@ function handle_events(outbox, approvals)
   end
 end
 
-while true
+while !eof(stdin)
   print("You: ")
   input = readline()
   input == "exit" && break

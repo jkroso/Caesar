@@ -11,7 +11,8 @@
 @use "./gateway/telegram"...
 @use Dates...
 @use HTTP
-@use JSON3
+@use "github.com/jkroso/JSON.jl" parse_json
+@use "github.com/jkroso/JSON.jl/write" json
 @use SQLite
 @use YAML
 @use UUIDs
@@ -41,7 +42,7 @@ function emit(obj; conversation_id::Union{String,Nothing}=nothing)
   if conversation_id !== nothing
     obj["conversation_id"] = conversation_id
   end
-  println("PROSCA:", JSON3.write(obj))
+  println("PROSCA:", json(obj))
   flush(stdout)
 end
 
@@ -108,7 +109,7 @@ function _fetch_xai_models(api_key::String)
     resp = HTTP.get("https://api.x.ai/v1/models";
       headers=["Authorization" => "Bearer $api_key"],
       connect_timeout=5, readtimeout=10)
-    parsed = JSON3.read(String(resp.body))
+    parsed = parse_json(String(resp.body))
     for m in get(parsed, :data, [])
       id = string(get(m, :id, ""))
       if !isempty(id)
@@ -127,7 +128,7 @@ function _fetch_anthropic_models(api_key::String)
     resp = HTTP.get("https://api.anthropic.com/v1/models";
       headers=["x-api-key" => api_key, "anthropic-version" => "2023-06-01"],
       connect_timeout=5, readtimeout=10)
-    parsed = JSON3.read(String(resp.body))
+    parsed = parse_json(String(resp.body))
     for m in get(parsed, :data, [])
       id = string(get(m, :id, ""))
       display_name = string(get(m, :display_name, id))
@@ -146,7 +147,7 @@ function _fetch_gemini_models(api_key::String)
   try
     resp = HTTP.get("https://generativelanguage.googleapis.com/v1beta/models?key=$api_key";
       connect_timeout=5, readtimeout=10)
-    parsed = JSON3.read(String(resp.body))
+    parsed = parse_json(String(resp.body))
     for m in get(parsed, :models, [])
       # API returns "models/gemini-2.5-pro" — strip the prefix
       full_name = string(get(m, :name, ""))
@@ -194,7 +195,7 @@ function handle_models_list()
   # Query Ollama for local models
   try
     resp = HTTP.get("http://localhost:11434/api/tags"; connect_timeout=3, readtimeout=5)
-    parsed = JSON3.read(String(resp.body))
+    parsed = parse_json(String(resp.body))
     for m in get(parsed, :models, [])
       name = string(get(m, :name, ""))
       if !isempty(name)
@@ -248,8 +249,8 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
   end
   empty!(history)
   for msg in messages
-    role = string(get(msg, :role, ""))
-    text = string(get(msg, :text, ""))
+    role = string(get(msg, "role", ""))
+    text = string(get(msg, "text", ""))
     if role == "user"
       push!(history, UserMessage(text))
     elseif role == "agent"
@@ -281,10 +282,10 @@ function handle_projects_list()
 end
 
 function handle_project_create(msg)
-  name = string(get(msg, :name, ""))
-  path = string(get(msg, :path, ""))
-  model = let v = get(msg, :model, nothing); v === nothing ? nothing : string(v) end
-  idle_mins = get(msg, :idle_check_mins, 30)
+  name = string(get(msg, "name", ""))
+  path = string(get(msg, "path", ""))
+  model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
+  idle_mins = get(msg, "idle_check_mins", 30)
 
   isempty(name) && (emit(Dict("type" => "error", "text" => "Project name required")); return)
   isempty(path) && (emit(Dict("type" => "error", "text" => "Project path required")); return)
@@ -314,7 +315,7 @@ function handle_project_create(msg)
 end
 
 function handle_project_update(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   isempty(id) && return
 
   sets = String[]
@@ -340,7 +341,7 @@ function handle_project_update(msg)
 end
 
 function handle_project_delete(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   rows = SQLite.DBInterface.execute(DB[], "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
   if length(rows) > 0 && rows[1].is_default == 1
     emit(Dict("type" => "error", "text" => "Cannot delete the default project"))
@@ -355,7 +356,7 @@ end
 # ── Routine CRUD ─────────────────────────────────────────────────────
 
 function handle_routines_list(msg)
-  project_id = let v = get(msg, :project_id, nothing); v === nothing ? nothing : string(v) end
+  project_id = let v = get(msg, "project_id", nothing); v === nothing ? nothing : string(v) end
   query = if project_id !== nothing
     SQLite.DBInterface.execute(DB[], """
       SELECT r.*, p.name as project_name FROM routines r
@@ -384,10 +385,10 @@ function handle_routines_list(msg)
 end
 
 function handle_routine_create(msg)
-  project_id = string(get(msg, :project_id, ""))
-  prompt = string(get(msg, :prompt, ""))
-  schedule_natural = string(get(msg, :schedule_natural, ""))
-  model = let v = get(msg, :model, nothing); v === nothing ? nothing : string(v) end
+  project_id = string(get(msg, "project_id", ""))
+  prompt = string(get(msg, "prompt", ""))
+  schedule_natural = string(get(msg, "schedule_natural", ""))
+  model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
 
   isempty(project_id) && (emit(Dict("type" => "error", "text" => "Project required")); return)
   isempty(prompt) && (emit(Dict("type" => "error", "text" => "Routine prompt required")); return)
@@ -458,7 +459,7 @@ NAME: <short name>"""
 end
 
 function handle_routine_update(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   isempty(id) && return
 
   sets = String[]
@@ -471,7 +472,7 @@ function handle_routine_update(msg)
     end
   end
 
-  schedule_natural = get(msg, :schedule_natural, nothing)
+  schedule_natural = get(msg, "schedule_natural", nothing)
   if schedule_natural !== nothing
     sn = string(schedule_natural)
     push!(sets, "schedule_natural=?")
@@ -495,15 +496,15 @@ function handle_routine_update(msg)
 end
 
 function handle_routine_delete(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   SQLite.execute(DB[], "DELETE FROM routine_runs WHERE routine_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM routines WHERE id=?", (id,))
   handle_routines_list(msg)
 end
 
 function handle_routine_runs_list(msg)
-  project_id = let v = get(msg, :project_id, nothing); v === nothing ? nothing : string(v) end
-  unseen_only = get(msg, :unseen_only, false)
+  project_id = let v = get(msg, "project_id", nothing); v === nothing ? nothing : string(v) end
+  unseen_only = get(msg, "unseen_only", false)
 
   conditions = String[]
   params = Any[]
@@ -525,7 +526,7 @@ function handle_routine_runs_list(msg)
 end
 
 function handle_routine_runs_mark_seen(msg)
-  ids = get(msg, :ids, [])
+  ids = get(msg, "ids", [])
   for id in ids
     SQLite.execute(DB[], "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
   end
@@ -542,8 +543,8 @@ function handle_agents_list()
 end
 
 function handle_agent_create(msg)
-  name = string(get(msg, :name, ""))
-  description = string(get(msg, :description, ""))
+  name = string(get(msg, "name", ""))
+  description = string(get(msg, "description", ""))
   isempty(name) && (emit(Dict("type" => "error", "text" => "Agent name required")); return)
   if !all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name)
     emit(Dict("type" => "error", "text" => "Agent name must be alphanumeric (hyphens/underscores allowed)")); return
@@ -558,16 +559,16 @@ function handle_agent_create(msg)
 end
 
 function handle_agent_update(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   isempty(id) && return
-  soul = let v = get(msg, :soul, nothing); v === nothing ? nothing : string(v) end
-  instructions = let v = get(msg, :instructions, nothing); v === nothing ? nothing : string(v) end
+  soul = let v = get(msg, "soul", nothing); v === nothing ? nothing : string(v) end
+  instructions = let v = get(msg, "instructions", nothing); v === nothing ? nothing : string(v) end
   update_agent!(id; soul, instructions)
   handle_agents_list()
 end
 
 function handle_agent_delete(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   if id == "prosca"
     emit(Dict("type" => "error", "text" => "Cannot delete the default agent")); return
   end
@@ -593,7 +594,7 @@ function handle_conversations_list()
 end
 
 function handle_conversation_create(msg)
-  agent_id = string(get(msg, :agent_id, "prosca"))
+  agent_id = string(get(msg, "agent_id", "prosca"))
   haskey(AGENTS, agent_id) || (emit(Dict("type" => "error", "text" => "Unknown agent '$agent_id'")); return)
   id = string(UUIDs.uuid4())
   SQLite.execute(DB[], """
@@ -604,15 +605,15 @@ function handle_conversation_create(msg)
 end
 
 function handle_conversation_delete(msg)
-  id = string(get(msg, :id, ""))
+  id = string(get(msg, "id", ""))
   SQLite.execute(DB[], "DELETE FROM conversations WHERE id=?", (id,))
   delete!(GUI_CONVERSATIONS, id)
   handle_conversations_list()
 end
 
 function handle_conversation_update_title(msg)
-  id = string(get(msg, :id, ""))
-  title = string(get(msg, :title, ""))
+  id = string(get(msg, "id", ""))
+  title = string(get(msg, "title", ""))
   SQLite.execute(DB[], "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
   handle_conversations_list()
 end
@@ -905,22 +906,22 @@ while !eof(stdin)
   isempty(line) && continue
 
   msg = try
-    JSON3.read(line)
+    parse_json(line)
   catch e
     @warn "Failed to parse input JSON" line exception=e
     emit(Dict("type" => "error", "text" => "Invalid JSON: $(sprint(showerror, e))"))
     continue
   end
 
-  msg_type = get(msg, :type, "")
-  conv_id = let v = get(msg, :conversation_id, nothing)
+  msg_type = get(msg, "type", "")
+  conv_id = let v = get(msg, "conversation_id", nothing)
     v === nothing ? nothing : string(v)
   end
 
   try
     if msg_type == "user_message"
-      text = string(get(msg, :text, ""))
-      agent_id = string(get(msg, :agent_id, "prosca"))
+      text = string(get(msg, "text", ""))
+      agent_id = string(get(msg, "agent_id", "prosca"))
       last_user_activity_at[] = now(Dates.UTC)
       agent = get(AGENTS, agent_id, default_agent())
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
@@ -929,8 +930,8 @@ while !eof(stdin)
       put!(agent.inbox, Envelope(text; outbox, approvals, session_history=conv.history, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
       @async handle_events(outbox; conversation_id=conv_id, approvals)
     elseif msg_type == "tool_approval"
-      id = parse(UInt64, string(get(msg, :id, "0")))
-      decision_str = string(get(msg, :decision, "deny"))
+      id = parse(UInt64, string(get(msg, "id", "0")))
+      decision_str = string(get(msg, "decision", "deny"))
       decision = if decision_str == "allow"
         :allow
       elseif decision_str == "always"
@@ -955,14 +956,14 @@ while !eof(stdin)
     elseif msg_type == "reset"
       handle_reset(conv_id)
     elseif msg_type == "restore_context"
-      messages = get(msg, :messages, [])
+      messages = get(msg, "messages", [])
       handle_restore_context(messages; conv_id)
     elseif msg_type == "generate_title"
-      text = string(get(msg, :text, ""))
+      text = string(get(msg, "text", ""))
       @async handle_generate_title(text; conversation_id=conv_id)
     elseif msg_type == "command"
-      cmd_name = string(get(msg, :name, ""))
-      cmd_args = string(get(msg, :args, ""))
+      cmd_name = string(get(msg, "name", ""))
+      cmd_args = string(get(msg, "args", ""))
       if haskey(COMMANDS, cmd_name)
         result = try
           COMMANDS[cmd_name].fn(cmd_args)

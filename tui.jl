@@ -577,9 +577,7 @@ end
 enable_markdown()
 
 # Redirect stderr to the agent's REPL log so warnings don't corrupt the TUI
-let agent = first(values(AGENTS))
-  redirect_stderr(agent.repl_log)
-end
+redirect_stderr(first(values(AGENTS)).repl_log)
 
 let model = ProscaModel()
   push_chat!(model, "Caesar started", tstyle(:success, bold=true))
