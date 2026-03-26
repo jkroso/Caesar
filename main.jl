@@ -1,7 +1,8 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use LinearAlgebra...
-@use PromptingTools
+@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama TokenStream
+@use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
 @use Logging
 @use SQLite
@@ -27,7 +28,6 @@ const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn"
 # ── Mutable state initialized at runtime ─────────────────────────────
 const CONFIG = Dict{String,Any}()
 const DB = Ref{SQLite.DB}()
-const LLM_SCHEMA = Ref{Any}()
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
@@ -48,6 +48,10 @@ end
 struct ToolResult
   name::String
   result::String
+end
+
+struct StreamToken
+  text::String
 end
 
 struct AgentDone end
@@ -279,40 +283,34 @@ function route_notification(router::PresenceRouter, text::String;
     end
   end
 end
+# ── Message Types (for conversation history) ────────────────────────
+struct SystemMessage; content::String end
+struct UserMessage; content::String end
+struct AIMessage; content::String end
+const AbstractMessage = Union{SystemMessage, UserMessage, AIMessage}
 
-# ── LLM Schema Detection ────────────────────────────────────────────
-
-function _detect_schema()
-  model = get(CONFIG, "llm", "")
-  _detect_schema_for(model)
-end
-
-function _detect_schema_for(model::String)
-  if startswith(model, "ollama:")
-    PromptingTools.OllamaSchema()
-  elseif startswith(model, "gpt-") || startswith(model, "o3") || startswith(model, "o4")
-    haskey(CONFIG, "openai_key") && (ENV["OPENAI_API_KEY"] = CONFIG["openai_key"])
-    PromptingTools.OpenAISchema()
-  elseif startswith(model, "claude-")
-    haskey(CONFIG, "anthropic_key") && (ENV["ANTHROPIC_API_KEY"] = CONFIG["anthropic_key"])
-    PromptingTools.AnthropicSchema()
-  elseif startswith(model, "gemini-")
-    haskey(CONFIG, "google_key") && (ENV["GOOGLE_API_KEY"] = CONFIG["google_key"])
-    PromptingTools.GoogleSchema()
-  elseif startswith(model, "mistral-")
-    haskey(CONFIG, "mistral_key") && (ENV["MISTRAL_API_KEY"] = CONFIG["mistral_key"])
-    PromptingTools.MistralOpenAISchema()
-  elseif startswith(model, "deepseek-")
-    haskey(CONFIG, "deepseek_key") && (ENV["DEEPSEEK_API_KEY"] = CONFIG["deepseek_key"])
-    PromptingTools.DeepSeekOpenAISchema()
-  elseif startswith(model, "grok-")
-    haskey(CONFIG, "xai_key") && (ENV["XAI_API_KEY"] = CONFIG["xai_key"])
-    PromptingTools.XAIOpenAISchema()
-  else
-    PromptingTools.OllamaSchema()
+"Flatten a message vector into (system, user) for the LLM callable"
+function flatten_messages(messages::Vector{<:AbstractMessage})
+  system = ""
+  parts = String[]
+  for m in messages
+    if m isa SystemMessage
+      system = m.content
+    elseif m isa UserMessage
+      push!(parts, m.content)
+    elseif m isa AIMessage
+      push!(parts, "Assistant: $(m.content)")
+    end
   end
+  (system, join(parts, "\n\n"))
 end
 
+"Send messages to the default LLM and return the full response text"
+function llm_generate(messages::Vector{<:AbstractMessage}; model::Union{String,Nothing}=nothing)::String
+  llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)
+  system, user = flatten_messages(messages)
+  read(llm(system, user), String)
+end
 
 function log_memory(text::String; role::String="Agent", metadata=Dict(),
                     agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
@@ -347,7 +345,7 @@ function search_memories(query::String; limit::Int=5,
     "=== Relevant memories ===\n" * join(lines, "\n\n")
   elseif provider == :hindsight
     hs = @use("./memory/hindsight/hindsight")
-    results = hs.recall(conn, query; limit)
+    results = Base.invokelatest(hs.recall, conn, query; limit)
     isempty(results) && return "(no relevant memories)"
     lines = [get(r, "text", "") for r in results]
     "=== Relevant memories ===\n" * join(lines, "\n\n")
@@ -390,12 +388,8 @@ Return ONLY a JSON array, no other text."""
 
   extraction_model = get(CONFIG, "extraction_model", nothing)
   response = try
-    msgs = [PromptingTools.SystemMessage(prompt), PromptingTools.UserMessage(conversation)]
-    if extraction_model !== nothing
-      call_llm(msgs; model=extraction_model).content
-    else
-      call_llm(msgs).content
-    end
+    msgs = [SystemMessage(prompt), UserMessage(conversation)]
+    llm_generate(msgs; model=extraction_model)
   catch e
     @warn "Knowledge extraction LLM call failed" exception=e
     return
@@ -478,10 +472,10 @@ function consolidate!(engine::Engine, agent_id::String)
     isempty(bodies) && continue
 
     summary = try
-      call_llm([
-        PromptingTools.SystemMessage("Summarize these related knowledge notes into one consolidated note. Preserve key facts and use [[Wiki Links]] to connect to other concepts. Return only the note body text."),
-        PromptingTools.UserMessage(join(bodies, "\n\n---\n\n"))
-      ]).content
+      llm_generate([
+        SystemMessage("Summarize these related knowledge notes into one consolidated note. Preserve key facts and use [[Wiki Links]] to connect to other concepts. Return only the note body text."),
+        UserMessage(join(bodies, "\n\n---\n\n"))
+      ])
     catch e
       @warn "Consolidation LLM call failed" exception=e
       continue
@@ -638,6 +632,7 @@ struct Agent
   repl_module::Module
   repl_log::IOStream
   config::Dict{String, Any}
+  llm::LLM
   inbox::Channel
 end
 
@@ -647,8 +642,9 @@ function Agent(id::String, personality::String, instructions::String;
                repl_module::Module=Module(Symbol("agent_$id")),
                repl_log::IOStream=open(string(HOME*"agents"*id*"repl.log"), "w"),
                config::Dict{String, Any}=Dict{String, Any}(),
+               llm::LLM=LLM(get(CONFIG, "llm", "ollama:llama3"), CONFIG),
                inbox::Channel=Channel(Inf))
-  agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, inbox)
+  agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, llm, inbox)
   start!(agent)
   agent
 end
@@ -695,7 +691,7 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   catch
     Dict{String, Any}()
   end
-  config isa Dict || (config = Dict{String, Any}())
+  config = config isa Dict ? Dict{String, Any}(config) : Dict{String, Any}()
   Agent(id, read(soul_path, String), read(instr_path, String);
         skills=load_agent_skills(agent_dir), path=agent_dir, repl_module=mod, repl_log=logfile, config)
 end
@@ -719,16 +715,16 @@ function create_agent!(name::String, description::String)::Union{Agent, Nothing}
   mkpath(agent_dir * "skills")
   soul_content, instr_content = try
     gen_msgs = [
-      PromptingTools.SystemMessage("""You are creating a new AI agent persona. Generate two markdown files based on the description.
+      SystemMessage("""You are creating a new AI agent persona. Generate two markdown files based on the description.
 
       Reply in this exact format:
       ===SOUL===
       <soul.md content: personality, tone, values — 3-5 short paragraphs>
       ===INSTRUCTIONS===
       <instructions.md content: capabilities, constraints, how to approach tasks — bullet points>"""),
-      PromptingTools.UserMessage("Agent name: $name\nDescription: $description")
+      UserMessage("Agent name: $name\nDescription: $description")
     ]
-    result = call_llm(gen_msgs).content
+    result = llm_generate(gen_msgs)
     soul_match = match(r"===SOUL===\s*\n(.*?)===INSTRUCTIONS===\s*\n(.*)"s, result)
     if soul_match !== nothing
       strip(String(soul_match.captures[1])), strip(String(soul_match.captures[2]))
@@ -858,42 +854,8 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
 end
 
 # ── Session State ────────────────────────────────────────────────────
-const SESSION_HISTORY = PromptingTools.AbstractMessage[]
+const SESSION_HISTORY = AbstractMessage[]
 const AUTO_ALLOWED_TOOLS = Set{String}()
-
-struct LlmResult
-  content::String
-  input_tokens::Int
-  output_tokens::Int
-end
-
-function call_llm(messages; model::Union{String,Nothing}=nothing, schema=nothing)::LlmResult
-  temperature = get(CONFIG, "temperature", 0.7)
-  use_model = model !== nothing ? model : CONFIG["llm"]
-  is_local = startswith(use_model, "ollama:")
-  if is_local
-    use_model = use_model[length("ollama:")+1:end]
-  end
-  default_timeout = if is_local
-    300
-  elseif any(p -> contains(lowercase(use_model), p), ("reason", "think", "-r1", "deepthink")) ||
-         any(p -> startswith(lowercase(use_model), p), ("o1", "o3", "o4"))
-    180
-  else
-    60
-  end
-  timeout = get(CONFIG, "llm_timeout", default_timeout)
-  use_schema = schema !== nothing ? schema : LLM_SCHEMA[]
-  if model !== nothing && schema === nothing
-    use_schema = _detect_schema_for(model)
-  end
-  resp = PromptingTools.aigenerate(use_schema, messages;
-    model=use_model, temperature,
-    http_kwargs=(; retry_non_idempotent=false, retries=0, readtimeout=timeout))
-  input_tokens = try get(resp.run_info, :prompt_tokens, 0) catch; 0 end
-  output_tokens = try get(resp.run_info, :completion_tokens, 0) catch; 0 end
-  LlmResult(resp.content, input_tokens, output_tokens)
-end
 
 # ── ReAct Agent Loop ─────────────────────────────────────────────────
 
@@ -947,11 +909,11 @@ function _process_message(user_input::String, agent::Agent;
   end
 
   memories = search_memories(user_input; agent_id=agent.id, conversation_id)
-  messages = PromptingTools.AbstractMessage[PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))]
+  messages = AbstractMessage[SystemMessage(build_system_prompt(agent; active_skill))]
 
   window = session_history[max(1, end-19):end]
   append!(messages, window)
-  push!(messages, PromptingTools.UserMessage("$memories\n\nTask: $user_input"))
+  push!(messages, UserMessage("$memories\n\nTask: $user_input"))
 
   max_steps = get(CONFIG, "max_steps", 1000)
   hit_limit = false
@@ -960,12 +922,20 @@ function _process_message(user_input::String, agent::Agent;
       user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
       if !isempty(user_names)
         scope = join(user_names, ", ")
-        push!(messages, PromptingTools.UserMessage("[REPL scope] Variables: $scope"))
+        push!(messages, UserMessage("[REPL scope] Variables: $scope"))
       end
     end
 
     response_text = try
-      call_llm(messages).content
+      temperature = get(CONFIG, "temperature", 0.7)
+      system, user = flatten_messages(messages)
+      stream = agent.llm(system, user; temperature)
+      buf = IOBuffer()
+      while !eof(stream)
+        chunk = String(readavailable(stream))
+        !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
+      end
+      String(take!(buf))
     catch e
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
       break
@@ -1013,8 +983,8 @@ function _process_message(user_input::String, agent::Agent;
                         contains(response_text, "\"skill\"") ||
                         contains(response_text, "\"handoff\"")
       if looks_like_json
-        push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Your JSON was malformed and couldn't be parsed. Return exactly ONE JSON object per response. Try again."))
+        push!(messages, AIMessage(response_text))
+        push!(messages, UserMessage("Your JSON was malformed and couldn't be parsed. Return exactly ONE JSON object per response. Try again."))
         @warn "Malformed JSON from LLM, asking to retry" response_text
         continue
       end
@@ -1035,13 +1005,13 @@ function _process_message(user_input::String, agent::Agent;
       if haskey(all_skills, sn)
         active_skill = all_skills[sn]
         @info "LLM activated skill: $sn"
-        messages[1] = PromptingTools.SystemMessage(build_system_prompt(agent; active_skill))
-        push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
+        messages[1] = SystemMessage(build_system_prompt(agent; active_skill))
+        push!(messages, AIMessage(response_text))
+        push!(messages, UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
         continue
       else
-        push!(messages, PromptingTools.AIMessage(response_text))
-        push!(messages, PromptingTools.UserMessage("Unknown skill '$sn'. Available: $(join(keys(all_skills), ", "))"))
+        push!(messages, AIMessage(response_text))
+        push!(messages, UserMessage("Unknown skill '$sn'. Available: $(join(keys(all_skills), ", "))"))
         continue
       end
     end
@@ -1052,9 +1022,9 @@ function _process_message(user_input::String, agent::Agent;
       context_summary = string(get(parsed.handoff, :context, ""))
 
       if !haskey(AGENTS, to_agent_id)
-        push!(messages, PromptingTools.AIMessage(response_text))
+        push!(messages, AIMessage(response_text))
         available = join([a.id for a in values(AGENTS) if a.id != agent.id], ", ")
-        push!(messages, PromptingTools.UserMessage("Unknown agent '$to_agent_id'. Available agents: $available"))
+        push!(messages, UserMessage("Unknown agent '$to_agent_id'. Available agents: $available"))
         continue
       end
 
@@ -1088,8 +1058,8 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("eval", result))
       log_memory("Eval: $code → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, PromptingTools.AIMessage(response_text))
-      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      push!(messages, AIMessage(response_text))
+      push!(messages, UserMessage("Result: $result"))
       continue
     end
 
@@ -1105,8 +1075,8 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("js", result))
       log_memory("JS: $(first(js_code, 200)) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, PromptingTools.AIMessage(response_text))
-      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      push!(messages, AIMessage(response_text))
+      push!(messages, UserMessage("Result: $result"))
       continue
     end
 
@@ -1121,8 +1091,8 @@ function _process_message(user_input::String, agent::Agent;
       end
       put!(outbox, ToolResult("index_page", result))
       log_memory("State: $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, PromptingTools.AIMessage(response_text))
-      push!(messages, PromptingTools.UserMessage("Result: $result"))
+      push!(messages, AIMessage(response_text))
+      push!(messages, UserMessage("Result: $result"))
       continue
     end
 
@@ -1131,8 +1101,8 @@ function _process_message(user_input::String, agent::Agent;
     args_str = haskey(parsed, :args) ? JSON3.write(parsed.args) : "{}"
 
     if !haskey(TOOLS, tn)
-      push!(messages, PromptingTools.AIMessage(response_text))
-      push!(messages, PromptingTools.UserMessage("Error: Unknown tool '$tn'. Use {\"eval\": \"...\"} for Julia code, or use a valid tool name, or return {\"final_answer\": \"...\"}"))
+      push!(messages, AIMessage(response_text))
+      push!(messages, UserMessage("Error: Unknown tool '$tn'. Use {\"eval\": \"...\"} for Julia code, or use a valid tool name, or return {\"final_answer\": \"...\"}"))
       continue
     end
 
@@ -1146,8 +1116,8 @@ function _process_message(user_input::String, agent::Agent;
         if approval.decision == :always
           push!(auto_allowed, tn)
         elseif approval.decision == :deny
-          push!(messages, PromptingTools.AIMessage(response_text))
-          push!(messages, PromptingTools.UserMessage("Tool call to '$tn' was denied by user. Try a different approach or ask the user."))
+          push!(messages, AIMessage(response_text))
+          push!(messages, UserMessage("Tool call to '$tn' was denied by user. Try a different approach or ask the user."))
           continue
         end
       end
@@ -1162,8 +1132,8 @@ function _process_message(user_input::String, agent::Agent;
     put!(outbox, ToolResult(tn, result))
     log_memory("Tool: $tn($args_str) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
 
-    push!(messages, PromptingTools.AIMessage(response_text))
-    push!(messages, PromptingTools.UserMessage("Tool result: $result"))
+    push!(messages, AIMessage(response_text))
+    push!(messages, UserMessage("Tool result: $result"))
     step == max_steps && (hit_limit = true)
   end
 
@@ -1173,9 +1143,9 @@ function _process_message(user_input::String, agent::Agent;
 
   put!(outbox, AgentDone())
 
-  push!(session_history, PromptingTools.UserMessage(user_input))
+  push!(session_history, UserMessage(user_input))
   for i in length(messages):-1:1
-    if messages[i] isa PromptingTools.AIMessage
+    if messages[i] isa AIMessage
       push!(session_history, messages[i])
       break
     end
@@ -1201,13 +1171,13 @@ function _process_message(user_input::String, agent::Agent;
           hs = @use("./memory/hindsight/hindsight")
           last_response = ""
           for i in length(messages):-1:1
-            if messages[i] isa PromptingTools.AIMessage
+            if messages[i] isa AIMessage
               last_response = messages[i].content
               break
             end
           end
-          hs.retain(conn, "User: $user_input\n\nAssistant: $last_response";
-                    context="conversation turn")
+          Base.invokelatest(hs.retain, conn, "User: $user_input\n\nAssistant: $last_response";
+                           context="conversation turn")
         catch e
           @warn "Hindsight retain failed" exception=e
         end
@@ -1302,9 +1272,6 @@ function __init__()
       """, (string(UUIDs.uuid4()), personal_path))
     end
   end
-
-  # Initialize LLM schema
-  LLM_SCHEMA[] = _detect_schema()
 
   # Initialize mail auth if configured
   gw = get(CONFIG, "gateway", Dict())

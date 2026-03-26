@@ -18,10 +18,14 @@
   repl_scroll::ScrollPane = ScrollPane(Vector{Span}[]; following=true, word_wrap=true)
   repl_log_pos::Int     = 0               # bytes read so far from repl.log
   pending_tool::Union{Nothing, ToolCallRequest} = nothing
+  stream_buf::String    = ""              # accumulates StreamToken text
   agent_busy::Bool      = false
   quit::Bool            = false
   completions::Vector{String} = String[]
   completion_idx::Int   = 0
+  history::Vector{String} = String[]     # all submitted inputs, most recent last
+  history_match::String = ""             # current history suggestion (or "")
+  history_prefix::String = ""            # prefix that triggered the search
 end
 
 Tachikoma.should_quit(m::ProscaModel) = m.quit
@@ -62,6 +66,8 @@ end
 function submit_input!(m::ProscaModel)
   input_text = String(strip(text(m.input)))
   isempty(input_text) && return
+  push!(m.history, input_text)
+  dismiss_history!(m)
   if m.agent_busy
     push_chat!(m, "(Agent is thinking… please wait)", tstyle(:text_dim))
     return
@@ -162,6 +168,51 @@ function handle_backtab!(m::ProscaModel)
   m.completion_idx = mod1(m.completion_idx - 1, length(m.completions))
 end
 
+# ── History search ───────────────────────────────────────────────────
+
+"Search history backwards (older)"
+function search_history_back!(m::ProscaModel)
+  prefix = isempty(m.history_match) ? String(strip(text(m.input))) : m.history_prefix
+  start = if isempty(m.history_match)
+    length(m.history)
+  else
+    idx = findlast(==(m.history_match), m.history)
+    idx === nothing ? length(m.history) : idx - 1
+  end
+  for i in start:-1:1
+    entry = m.history[i]
+    if startswith(entry, prefix) && entry != prefix
+      m.history_prefix = prefix
+      m.history_match = entry
+      set_text!(m.input, entry)
+      return
+    end
+  end
+end
+
+"Search history forwards (newer)"
+function search_history_fwd!(m::ProscaModel)
+  isempty(m.history_match) && return
+  idx = findlast(==(m.history_match), m.history)
+  idx === nothing && return
+  for i in (idx + 1):length(m.history)
+    entry = m.history[i]
+    if startswith(entry, m.history_prefix) && entry != m.history_prefix
+      m.history_match = entry
+      set_text!(m.input, entry)
+      return
+    end
+  end
+  # No more forward matches — revert to prefix
+  set_text!(m.input, m.history_prefix)
+  dismiss_history!(m)
+end
+
+function dismiss_history!(m::ProscaModel)
+  m.history_match = ""
+  m.history_prefix = ""
+end
+
 # ── Poll REPL log for new lines ───────────────────────────────────────
 
 function poll_repl_log!(m::ProscaModel)
@@ -197,13 +248,31 @@ function drain_agent_events!(m::ProscaModel)
   m.outbox === nothing && return
   while isready(m.outbox)
     event = take!(m.outbox)
-    if event isa AgentMessage
+    if event isa StreamToken
+      m.stream_buf *= event.text
+      line = [Span("Agent: ", tstyle(:primary, bold=true)), Span(m.stream_buf, tstyle(:text))]
+      if m.stream_buf == event.text
+        # First token — push a new line
+        push_chat!(m, line)
+      else
+        # Update existing line in both messages and scroll
+        m.messages[end] = line
+        m.scroll.content[end] = line
+      end
+    elseif event isa AgentMessage
+      if !isempty(m.stream_buf)
+        m.stream_buf = ""
+        # Remove the streaming line from both messages and scroll
+        !isempty(m.messages) && pop!(m.messages)
+        !isempty(m.scroll.content) && pop!(m.scroll.content)
+      end
       if markdown_extension_loaded()
         push_markdown!(m, "Agent: ", tstyle(:primary, bold=true), event.text)
       else
         push_chat!(m, "Agent: ", tstyle(:primary, bold=true), event.text, tstyle(:text))
       end
     elseif event isa ToolCallRequest
+      m.stream_buf = ""
       push_chat!(m, "  Tool: $(event.name) ", tstyle(:accent, bold=true),
                  event.args, tstyle(:text_dim))
       m.pending_tool = event
@@ -252,7 +321,11 @@ function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
 
   if m.active_tab == 1
     if e.key == :tab
-      handle_tab!(m)
+      if !isempty(m.history_match)
+        dismiss_history!(m)
+      else
+        handle_tab!(m)
+      end
       return
     end
     if e.key == :backtab
@@ -269,16 +342,35 @@ function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
         return
       end
     end
-    if e.key == :escape && !isempty(m.completions)
-      dismiss_completions!(m)
+    if e.key == :up && isempty(m.completions)
+      search_history_back!(m)
       return
     end
+    if e.key == :down && !isempty(m.history_match)
+      search_history_fwd!(m)
+      return
+    end
+    if e.key == :escape
+      if !isempty(m.history_match)
+        set_text!(m.input, m.history_prefix)
+        dismiss_history!(m)
+        return
+      end
+      if !isempty(m.completions)
+        dismiss_completions!(m)
+        return
+      end
+    end
     if e.key == :enter
+      if !isempty(m.history_match)
+        dismiss_history!(m)
+        submit_input!(m)
+        return
+      end
       if !isempty(m.completions) && m.completion_idx > 0
         selected = m.completions[m.completion_idx]
         current_text = strip(String(text(m.input)))
         if current_text == selected || current_text == selected * " "
-          # Input already matches the selection — submit it
           dismiss_completions!(m)
           submit_input!(m)
         else
@@ -294,6 +386,7 @@ function Tachikoma.update!(m::ProscaModel, e::KeyEvent)
       return
     end
     handle_key!(m.input, e)
+    !isempty(m.history_match) && dismiss_history!(m)
     current = String(text(m.input))
     trimmed = strip(current)
     if !isempty(trimmed) && startswith(trimmed, "/")
@@ -388,8 +481,7 @@ function Tachikoma.view(m::ProscaModel, f::Frame)
     Span("Ctrl+Q:quit ", tstyle(:text_dim)),
     Span("$(get(CONFIG, "llm", "")) ", tstyle(:primary)),
   ]
-  sbar = StatusBar(; left=status_left, right=status_right,
-                   style=Style(; bg=tstyle(:border).fg))
+  sbar = StatusBar(; left=status_left, right=status_right)
   render(sbar, status_rect, buf)
 end
 

@@ -4,7 +4,7 @@ const prosca = parentmodule(@__MODULE__)
 const name = "model"
 const description = "Switch LLM model and provider"
 
-# Provider → (name, schema_type, env_var, config_key, models)
+# Provider → (name, prefix, env_var, config_key, models)
 const PROVIDERS = [
   ("Ollama (local)", :ollama, nothing, nothing, ["qwen3.5:35b", "qwen3.5:27b", "llama3.3:70b", "gemma3:27b", "deepseek-r1:32b"]),
   ("OpenAI", :openai, "OPENAI_API_KEY", "openai_key", ["gpt-5.4"]),
@@ -14,33 +14,6 @@ const PROVIDERS = [
   ("DeepSeek", :deepseek, "DEEPSEEK_API_KEY", "deepseek_key", ["deepseek-chat", "deepseek-reasoner"]),
   ("xAI", :xai, "XAI_API_KEY", "xai_key", ["grok-code-fast-1", "grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning"]),
 ]
-
-function make_schema(provider_type::Symbol, api_key::Union{String,Nothing}=nothing)
-  PT = prosca.PromptingTools
-  if provider_type == :ollama
-    PT.OllamaSchema()
-  elseif provider_type == :openai
-    api_key !== nothing && (ENV["OPENAI_API_KEY"] = api_key)
-    PT.OpenAISchema()
-  elseif provider_type == :anthropic
-    api_key !== nothing && (ENV["ANTHROPIC_API_KEY"] = api_key)
-    PT.AnthropicSchema()
-  elseif provider_type == :google
-    api_key !== nothing && (ENV["GOOGLE_API_KEY"] = api_key)
-    PT.GoogleSchema()
-  elseif provider_type == :mistral
-    api_key !== nothing && (ENV["MISTRAL_API_KEY"] = api_key)
-    PT.MistralOpenAISchema()
-  elseif provider_type == :deepseek
-    api_key !== nothing && (ENV["DEEPSEEK_API_KEY"] = api_key)
-    PT.DeepSeekOpenAISchema()
-  elseif provider_type == :xai
-    api_key !== nothing && (ENV["XAI_API_KEY"] = api_key)
-    PT.XAIOpenAISchema()
-  else
-    error("Unknown provider: $provider_type")
-  end
-end
 
 # Flat list of all model names for autocomplete
 const ALL_MODELS = String[]
@@ -53,14 +26,12 @@ function find_provider(model_name::AbstractString)
   for (pname, ptype, env_var, config_key, models) in PROVIDERS
     model_name in models && return (pname, ptype, env_var, config_key)
   end
-  # Default to ollama for unrecognized models
   ("Ollama (local)", :ollama, nothing, nothing)
 end
 
 function fn(args::AbstractString)::String
   model_name = String(strip(args))
 
-  # No argument: show available models
   if isempty(model_name)
     lines = ["Current: $(prosca.CONFIG["llm"])", "", "Usage: /model <name>", "", "Available models:"]
     for (pname, _, _, _, models) in PROVIDERS
@@ -74,7 +45,6 @@ function fn(args::AbstractString)::String
 
   # Handle "key:<api_key>" to set a provider key
   if startswith(model_name, "key:")
-    # /model key:openai_key=sk-xxx
     kv = model_name[5:end]
     eq = findfirst('=', kv)
     eq === nothing && return "Usage: /model key:<config_key>=<value>"
@@ -84,9 +54,8 @@ function fn(args::AbstractString)::String
     return "Saved $k to config."
   end
 
-  pname, ptype, env_var, config_key = find_provider(model_name)
+  pname, _, env_var, config_key = find_provider(model_name)
 
-  # Check API key for non-ollama providers
   if env_var !== nothing
     existing_key = get(prosca.CONFIG, config_key, "")
     if isempty(existing_key) && !haskey(ENV, env_var)
@@ -94,13 +63,6 @@ function fn(args::AbstractString)::String
     end
   end
 
-  api_key = if config_key !== nothing
-    get(prosca.CONFIG, config_key, get(ENV, env_var, nothing))
-  else
-    nothing
-  end
-
-  prosca.LLM_SCHEMA[] = make_schema(ptype, api_key)
   prosca.CONFIG["llm"] = model_name
   save_config!()
 

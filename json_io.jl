@@ -10,7 +10,6 @@
 @use "./scheduler"...
 @use "./gateway/telegram"...
 @use Dates...
-@use PromptingTools
 @use HTTP
 @use JSON3
 @use SQLite
@@ -20,7 +19,7 @@
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
 mutable struct GUIConversation
-  history::Vector{PromptingTools.AbstractMessage}
+  history::Vector{AbstractMessage}
   auto_allowed::Set{String}
   agent_id::String
 end
@@ -29,7 +28,7 @@ const GUI_CONVERSATIONS = Dict{String, GUIConversation}()
 
 function get_gui_conversation(id::String, agent_id::String="prosca")
   get!(GUI_CONVERSATIONS, id) do
-    GUIConversation(PromptingTools.AbstractMessage[], Set{String}(), agent_id)
+    GUIConversation(AbstractMessage[], Set{String}(), agent_id)
   end
 end
 
@@ -51,7 +50,9 @@ end
 function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=nothing, approvals::Channel)
   while true
     event = take!(outbox)
-    if event isa AgentMessage
+    if event isa StreamToken
+      emit(Dict("type" => "stream_token", "text" => event.text); conversation_id)
+    elseif event isa AgentMessage
       emit(Dict("type" => "agent_message", "text" => event.text); conversation_id)
     elseif event isa ToolCallRequest
       if !isempty(ROUTER.active_adapters)
@@ -78,10 +79,6 @@ end
 function handle_config_set(key::String, value)
   CONFIG[key] = value
   YAML.write_file(string(HOME * "config.yaml"), CONFIG)
-  # Re-detect LLM schema if model changed
-  if key == "llm"
-    LLM_SCHEMA[] = _detect_schema()
-  end
   emit(Dict("type" => "config", "data" => CONFIG))
 end
 
@@ -210,11 +207,9 @@ function handle_models_list()
 
   # Enrich with pricing from models.dev api.json
   for m in models
-    prices = get(PRICING, m["id"], nothing)
-    if prices !== nothing
-      m["cost_input"] = prices[1]
-      m["cost_output"] = prices[2]
-    end
+    prices = get_pricing(m["id"])
+    m["cost_input"] = prices[1]
+    m["cost_output"] = prices[2]
   end
 
   _models_cache[] = models
@@ -234,11 +229,11 @@ function handle_reset(conv_id::Union{String,Nothing}=nothing)
 end
 
 function handle_generate_title(text::String; conversation_id::Union{String,Nothing}=nothing)
-  messages = PromptingTools.AbstractMessage[
-    PromptingTools.SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
-    PromptingTools.UserMessage(text)
+  messages = AbstractMessage[
+    SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
+    UserMessage(text)
   ]
-  title = strip(call_llm(messages).content)
+  title = strip(llm_generate(messages))
   emit(Dict("type" => "title", "title" => title); conversation_id)
 end
 
@@ -256,9 +251,9 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
     role = string(get(msg, :role, ""))
     text = string(get(msg, :text, ""))
     if role == "user"
-      push!(history, PromptingTools.UserMessage(text))
+      push!(history, UserMessage(text))
     elseif role == "agent"
-      push!(history, PromptingTools.AIMessage(text))
+      push!(history, AIMessage(text))
     end
   end
   # Keep only the last 20 entries (10 exchange pairs) like _process_message does
@@ -422,10 +417,10 @@ NAME: <short name>"""
   end
   gen_prompt *= "\n\nPrompt: $prompt"
 
-  gen_msgs = [PromptingTools.SystemMessage("You generate short names for tasks and convert schedules to cron. Reply only in the requested format."),
-              PromptingTools.UserMessage(gen_prompt)]
+  gen_msgs = [SystemMessage("You generate short names for tasks and convert schedules to cron. Reply only in the requested format."),
+              UserMessage(gen_prompt)]
   result = try
-    call_llm(gen_msgs).content
+    llm_generate(gen_msgs)
   catch e
     emit(Dict("type" => "error", "text" => "Failed to generate routine: $(sprint(showerror, e))"))
     return
@@ -482,9 +477,9 @@ function handle_routine_update(msg)
     push!(sets, "schedule_natural=?")
     push!(vals, sn)
     if !isempty(sn)
-      parse_msgs = [PromptingTools.SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
-                    PromptingTools.UserMessage("Convert to cron: $sn")]
-      cron_str = strip(call_llm(parse_msgs).content)
+      parse_msgs = [SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
+                    UserMessage("Convert to cron: $sn")]
+      cron_str = strip(llm_generate(parse_msgs))
       push!(sets, "schedule_cron=?")
       push!(vals, cron_str)
       next_run = string(next_cron_time_utc(cron_str, now(Dates.UTC)))
@@ -676,23 +671,21 @@ Routine task: $(routine.prompt)
 
 Execute this task. At the end, on a new line, write either NOTABLE:true or NOTABLE:false to indicate whether the result is actionable or noteworthy for the user."""
 
-  messages = [PromptingTools.SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
-              PromptingTools.UserMessage(prompt)]
+  messages = [SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
+              UserMessage(prompt)]
 
   started_at = string(now(Dates.UTC))
-  result_obj = try
-    call_llm(messages; model)
+  content = try
+    llm_generate(messages; model)
   catch e
     @error "Routine execution failed" routine_id=routine.id exception=e
-    LlmResult("Error: $(sprint(showerror, e))", 0, 0)
+    "Error: $(sprint(showerror, e))"
   end
-
-  content = result_obj.content
   notable = occursin("NOTABLE:true", content) ? 1 : 0
   clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
 
-  cost = compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
-  total_tokens = result_obj.input_tokens + result_obj.output_tokens
+  total_tokens = 0
+  cost = 0.0
   finished_at = string(now(Dates.UTC))
 
   # Store run
@@ -751,22 +744,20 @@ $context
 
 Review this project and determine if there's anything you can do to help move it forward. If nothing needs doing, say so briefly. At the end, on a new line, write either NOTABLE:true or NOTABLE:false."""
 
-  messages = [PromptingTools.SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
-              PromptingTools.UserMessage(prompt)]
+  messages = [SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
+              UserMessage(prompt)]
 
   started_at = string(now(Dates.UTC))
-  result_obj = try
-    call_llm(messages; model)
+  content = try
+    llm_generate(messages; model)
   catch e
     @error "Project check-in failed" project_id=project.id exception=e
     return
   end
-
-  content = result_obj.content
   notable = occursin("NOTABLE:true", content) ? 1 : 0
   clean_result = replace(content, r"\nNOTABLE:(true|false)\s*$" => "")
-  cost = compute_cost(model, result_obj.input_tokens, result_obj.output_tokens)
-  total_tokens = result_obj.input_tokens + result_obj.output_tokens
+  total_tokens = 0
+  cost = 0.0
   finished_at = string(now(Dates.UTC))
 
   # Store as routine_run with NULL routine_id
