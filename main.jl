@@ -1,7 +1,7 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
-@use "github.com/jkroso/LLM.jl/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason
+@use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
 @use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
 @use Logging
@@ -411,14 +411,20 @@ struct Envelope
   approvals::Channel
   auto_allowed::Set{String}
   conversation_id::Union{String,Nothing}
+  images::Vector{Image}
+  audio::Vector{Audio}
+  documents::Vector{Document}
 end
 
 function Envelope(text::String;
                   outbox::Channel=Channel(32),
                   approvals::Channel=Channel(32),
                   auto_allowed::Set{String}=AUTO_ALLOWED_TOOLS,
-                  conversation_id::Union{String,Nothing}=nothing)
-  Envelope(text, outbox, approvals, auto_allowed, conversation_id)
+                  conversation_id::Union{String,Nothing}=nothing,
+                  images::Vector{Image}=Image[],
+                  audio::Vector{Audio}=Audio[],
+                  documents::Vector{Document}=Document[])
+  Envelope(text, outbox, approvals, auto_allowed, conversation_id, images, audio, documents)
 end
 
 struct Agent
@@ -455,7 +461,8 @@ function start!(agent::Agent)
     process_message(envelope.text, agent;
               outbox=envelope.outbox, inbox=envelope.approvals,
               auto_allowed=envelope.auto_allowed,
-              conversation_id=envelope.conversation_id)
+              conversation_id=envelope.conversation_id,
+              images=envelope.images, audio=envelope.audio, documents=envelope.documents)
   end
   agent
 end
@@ -669,9 +676,10 @@ end
 function process_message(user_input::String, agent::Agent;
                          outbox::Channel, inbox::Channel,
                          auto_allowed=AUTO_ALLOWED_TOOLS,
-                         conversation_id::Union{String,Nothing}=nothing)
+                         conversation_id::Union{String,Nothing}=nothing,
+                         images::Vector{Image}=Image[], audio::Vector{Audio}=Audio[], documents::Vector{Document}=Document[])
   try
-    _process_message(user_input, agent; outbox, inbox, auto_allowed, conversation_id)
+    _process_message(user_input, agent; outbox, inbox, auto_allowed, conversation_id, images, audio, documents)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -682,7 +690,8 @@ end
 function _process_message(user_input::String, agent::Agent;
                     outbox::Channel, inbox::Channel,
                     auto_allowed=AUTO_ALLOWED_TOOLS,
-                    conversation_id::Union{String,Nothing}=nothing)
+                    conversation_id::Union{String,Nothing}=nothing,
+                    images::Vector{Image}=Image[], audio::Vector{Audio}=Audio[], documents::Vector{Document}=Document[])
   log_memory("User: $user_input"; role="User", agent_id=agent.id, conversation_id)
 
   active_skill = nothing
@@ -702,7 +711,7 @@ function _process_message(user_input::String, agent::Agent;
 
   window = agent.history[max(1, end-19):end]
   append!(messages, window)
-  push!(messages, UserMessage("$memories\n\nTask: $user_input"))
+  push!(messages, UserMessage("$memories\n\nTask: $user_input", images, audio, documents))
 
   max_steps = get(CONFIG, "max_steps", 1000)
   hit_limit = false
@@ -720,7 +729,18 @@ function _process_message(user_input::String, agent::Agent;
       temperature = get(CONFIG, "temperature", 0.7)
       open(string(agent.path * "last_prompt.md"), "w") do io
         for m in messages
-          println(io, "## ", typeof(m).name.name, "\n\n", m isa ToolResultMessage ? m.content : m.text, "\n")
+          println(io, "## ", typeof(m).name.name)
+          if m isa AIMessage
+            !isempty(m.text) && println(io, m.text)
+            for tc in m.tool_calls
+              println(io, "  tool_call: $(tc.name)($(json(tc.arguments)))")
+            end
+          elseif m isa ToolResultMessage
+            println(io, m.content)
+          else
+            println(io, m.text)
+          end
+          println(io)
         end
       end
       agent.llm(Message[m for m in messages]; temperature, tools=TOOL_DEFS)
@@ -797,7 +817,8 @@ function _process_message(user_input::String, agent::Agent;
 
       put!(outbox, ToolResult(tc.name, result))
       log_memory("$(tc.name): $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, ToolResultMessage(tc.id, result))
+      truncated = length(result) > 4000 ? first(result, 4000) * "\n... (truncated)" : result
+      push!(messages, ToolResultMessage(tc.id, truncated))
     end
     step == max_steps && (hit_limit = true)
   end

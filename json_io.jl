@@ -925,9 +925,26 @@ while !eof(stdin)
       last_user_activity_at[] = now(Dates.UTC)
       agent = get(AGENTS, agent_id, default_agent())
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
+      # Parse file attachments
+      images = Image[]
+      audio_files = Audio[]
+      docs = Document[]
+      for att in get(msg, "attachments", [])
+        mime = string(get(att, "mime", ""))
+        data = base64decode(string(get(att, "data", "")))
+        if startswith(mime, "image/")
+          push!(images, ImageData(data, mime))
+        elseif startswith(mime, "audio/")
+          fmt = split(mime, '/')[2]
+          push!(audio_files, Audio(data, fmt))
+        else
+          push!(docs, Document(data, mime))
+        end
+      end
       outbox = Channel(32)
       approvals = Channel(32)
-      put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
+      put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed,
+                                 conversation_id=conv_id, images, audio=audio_files, documents=docs))
       @async handle_events(outbox; conversation_id=conv_id, approvals)
     elseif msg_type == "tool_approval"
       id = parse(UInt64, string(get(msg, "id", "0")))
