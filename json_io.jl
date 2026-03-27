@@ -224,7 +224,7 @@ function handle_reset(conv_id::Union{String,Nothing}=nothing)
     empty!(conv.history)
     empty!(conv.auto_allowed)
   else
-    empty!(SESSION_HISTORY)
+    empty!(default_agent().history)
     empty!(AUTO_ALLOWED_TOOLS)
   end
 end
@@ -245,7 +245,7 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
     conv.history
   else
     empty!(AUTO_ALLOWED_TOOLS)
-    SESSION_HISTORY
+    default_agent().history
   end
   empty!(history)
   for msg in messages
@@ -832,7 +832,7 @@ ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
     outbox = Channel(32)
     approvals = Channel(32)
     agent = get(AGENTS, conv.agent_id, default_agent())
-    put!(agent.inbox, Envelope(text; outbox, approvals, session_history=conv.history, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
+    put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
     # Drain agent events and send back to Telegram
     @async begin
         adapter = primary_adapter(ROUTER)
@@ -927,7 +927,7 @@ while !eof(stdin)
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
       outbox = Channel(32)
       approvals = Channel(32)
-      put!(agent.inbox, Envelope(text; outbox, approvals, session_history=conv.history, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
+      put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
       @async handle_events(outbox; conversation_id=conv_id, approvals)
     elseif msg_type == "tool_approval"
       id = parse(UInt64, string(get(msg, "id", "0")))

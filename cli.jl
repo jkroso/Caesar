@@ -1,4 +1,4 @@
-@use "." HOME default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage StreamToken Envelope SESSION_HISTORY AUTO_ALLOWED_TOOLS
+@use "." HOME default_agent CONFIG ToolApproval COMMANDS ToolResult AgentDone ToolCallRequest AgentMessage StreamToken Envelope AUTO_ALLOWED_TOOLS
 
 println("🧠 Caesar started")
 println("Brain: $HOME")

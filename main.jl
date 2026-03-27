@@ -398,7 +398,6 @@ struct Envelope
   text::String
   outbox::Channel
   approvals::Channel
-  session_history::Vector
   auto_allowed::Set{String}
   conversation_id::Union{String,Nothing}
 end
@@ -406,10 +405,9 @@ end
 function Envelope(text::String;
                   outbox::Channel=Channel(32),
                   approvals::Channel=Channel(32),
-                  session_history::Vector=SESSION_HISTORY,
                   auto_allowed::Set{String}=AUTO_ALLOWED_TOOLS,
                   conversation_id::Union{String,Nothing}=nothing)
-  Envelope(text, outbox, approvals, session_history, auto_allowed, conversation_id)
+  Envelope(text, outbox, approvals, auto_allowed, conversation_id)
 end
 
 struct Agent
@@ -422,6 +420,7 @@ struct Agent
   repl_log::IOStream
   config::Dict{String, Any}
   llm::LLM
+  history::Vector{Message}
   inbox::Channel
 end
 
@@ -432,8 +431,9 @@ function Agent(id::String, personality::String, instructions::String;
                repl_log::IOStream=open(string(HOME*"agents"*id*"repl.log"), "w"),
                config::Dict{String, Any}=Dict{String, Any}(),
                llm::LLM=LLM(get(CONFIG, "llm", "ollama:llama3"), CONFIG),
+               history::Vector{Message}=Message[],
                inbox::Channel=Channel(Inf))
-  agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, llm, inbox)
+  agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, llm, history, inbox)
   start!(agent)
   agent
 end
@@ -443,7 +443,6 @@ function start!(agent::Agent)
   @async for envelope in agent.inbox
     process_message(envelope.text, agent;
               outbox=envelope.outbox, inbox=envelope.approvals,
-              session_history=envelope.session_history,
               auto_allowed=envelope.auto_allowed,
               conversation_id=envelope.conversation_id)
   end
@@ -644,7 +643,6 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
 end
 
 # ── Session State ────────────────────────────────────────────────────
-const SESSION_HISTORY = Message[]
 const AUTO_ALLOWED_TOOLS = Set{String}()
 
 # ── ReAct Agent Loop ─────────────────────────────────────────────────
@@ -669,10 +667,10 @@ end
 
 function process_message(user_input::String, agent::Agent;
                          outbox::Channel, inbox::Channel,
-                         session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
+                         auto_allowed=AUTO_ALLOWED_TOOLS,
                          conversation_id::Union{String,Nothing}=nothing)
   try
-    _process_message(user_input, agent; outbox, inbox, session_history, auto_allowed, conversation_id)
+    _process_message(user_input, agent; outbox, inbox, auto_allowed, conversation_id)
   catch e
     @error "Agent error" exception=(e, catch_backtrace())
     put!(outbox, AgentMessage("Agent error: $(sprint(showerror, e))"))
@@ -682,7 +680,7 @@ end
 
 function _process_message(user_input::String, agent::Agent;
                     outbox::Channel, inbox::Channel,
-                    session_history=SESSION_HISTORY, auto_allowed=AUTO_ALLOWED_TOOLS,
+                    auto_allowed=AUTO_ALLOWED_TOOLS,
                     conversation_id::Union{String,Nothing}=nothing)
   log_memory("User: $user_input"; role="User", agent_id=agent.id, conversation_id)
 
@@ -701,7 +699,7 @@ function _process_message(user_input::String, agent::Agent;
   memories = search_memories(user_input; agent_id=agent.id, conversation_id)
   messages = AbstractMessage[SystemMessage(build_system_prompt(agent; active_skill))]
 
-  window = session_history[max(1, end-19):end]
+  window = agent.history[max(1, end-19):end]
   append!(messages, window)
   push!(messages, UserMessage("$memories\n\nTask: $user_input"))
 
@@ -942,10 +940,10 @@ function _process_message(user_input::String, agent::Agent;
 
   put!(outbox, AgentDone())
 
-  push!(session_history, UserMessage(user_input))
+  push!(agent.history, UserMessage(user_input))
   for i in length(messages):-1:1
     if messages[i] isa AIMessage
-      push!(session_history, messages[i])
+      push!(agent.history, messages[i])
       break
     end
   end
