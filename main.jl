@@ -742,7 +742,7 @@ function _process_message(user_input::String, agent::Agent;
 
     # No tool calls — treat as final text response
     if isempty(tool_calls)
-      text = strip(response_text)
+      text = String(strip(response_text))
       isempty(text) && (step == max_steps && (hit_limit = true); continue)
       put!(outbox, AgentMessage(text))
       log_memory("Agent: $text"; agent_id=agent.id, conversation_id)
