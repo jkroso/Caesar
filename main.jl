@@ -947,6 +947,7 @@ function _process_message(user_input::String, agent::Agent;
         chunk = String(readavailable(stream))
         !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
       end
+      close(stream)
       String(take!(buf))
     catch e
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
