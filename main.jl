@@ -1,6 +1,7 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
+@use "github.com/jkroso/LLM.jl/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage
 @use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
 @use Logging
@@ -277,36 +278,10 @@ function route_notification(router::PresenceRouter, text::String;
     end
   end
 end
-# ── Message Types (for conversation history) ────────────────────────
-struct SystemMessage; content::String end
-struct UserMessage; content::String end
-struct AIMessage; content::String end
-struct ToolResultMessage; content::String end
-const AbstractMessage = Union{SystemMessage, UserMessage, AIMessage, ToolResultMessage}
-
-"Flatten a message vector into (system, user) for the LLM callable"
-function flatten_messages(messages::Vector)
-  system = ""
-  parts = String[]
-  for m in messages
-    if m isa SystemMessage
-      system = m.content
-    elseif m isa UserMessage
-      push!(parts, "[user]\n$(m.content)")
-    elseif m isa AIMessage
-      push!(parts, "[assistant]\n$(m.content)")
-    elseif m isa ToolResultMessage
-      push!(parts, "[tool_result]\n$(m.content)")
-    end
-  end
-  (system, join(parts, "\n\n"))
-end
-
 "Send messages to the default LLM and return the full response text"
 function llm_generate(messages::Vector; model::Union{String,Nothing}=nothing)::String
   llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)
-  system, user = flatten_messages(messages)
-  read(llm(system, user), String)
+  read(llm(Message[m for m in messages]), String)
 end
 
 function log_memory(text::String; role::String="Agent", metadata=Dict(),
@@ -664,16 +639,12 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   $skill_list
   Or {"final_answer": "your response here"}
 
-  ## Conversation format
-  The conversation history uses [user], [assistant], and [tool_result] markers to delimit turns.
-  Your previous responses appear after [assistant]. Tool/eval results appear after [tool_result].
-  Always respond as yourself — never generate these markers.
   $skill_injection$handoff_section
   """
 end
 
 # ── Session State ────────────────────────────────────────────────────
-const SESSION_HISTORY = AbstractMessage[]
+const SESSION_HISTORY = Message[]
 const AUTO_ALLOWED_TOOLS = Set{String}()
 
 # ── ReAct Agent Loop ─────────────────────────────────────────────────
@@ -747,11 +718,12 @@ function _process_message(user_input::String, agent::Agent;
 
     response_text = try
       temperature = get(CONFIG, "temperature", 0.7)
-      system, user = flatten_messages(messages)
       open(string(agent.path * "last_prompt.md"), "w") do io
-        println(io, "# System\n\n", system, "\n\n# User\n\n", user)
+        for m in messages
+          println(io, "## ", typeof(m).name.name, "\n\n", m isa ToolResultMessage ? m.content : m.text, "\n")
+        end
       end
-      stream = agent.llm(system, user; temperature)
+      stream = agent.llm(Message[m for m in messages]; temperature)
       buf = IOBuffer()
       while !eof(stream)
         chunk = String(readavailable(stream))
@@ -886,7 +858,7 @@ function _process_message(user_input::String, agent::Agent;
       put!(outbox, ToolResult("eval", result))
       log_memory("Eval: $code → $(first(result, 500))"; agent_id=agent.id, conversation_id)
       push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage(result))
+      push!(messages, ToolResultMessage("", result))
       continue
     end
 
@@ -903,7 +875,7 @@ function _process_message(user_input::String, agent::Agent;
       put!(outbox, ToolResult("js", result))
       log_memory("JS: $(first(js_code, 200)) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
       push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage(result))
+      push!(messages, ToolResultMessage("", result))
       continue
     end
 
@@ -919,7 +891,7 @@ function _process_message(user_input::String, agent::Agent;
       put!(outbox, ToolResult("index_page", result))
       log_memory("State: $(first(result, 500))"; agent_id=agent.id, conversation_id)
       push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage(result))
+      push!(messages, ToolResultMessage("", result))
       continue
     end
 
@@ -960,7 +932,7 @@ function _process_message(user_input::String, agent::Agent;
     log_memory("Tool: $tn($args_str) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
 
     push!(messages, AIMessage(clean_json))
-    push!(messages, ToolResultMessage(result))
+    push!(messages, ToolResultMessage("", result))
     step == max_steps && (hit_limit = true)
   end
 
@@ -989,7 +961,7 @@ function _process_message(user_input::String, agent::Agent;
           last_response = ""
           for i in length(messages):-1:1
             if messages[i] isa AIMessage
-              last_response = messages[i].content
+              last_response = messages[i].text
               break
             end
           end

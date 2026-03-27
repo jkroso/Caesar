@@ -20,7 +20,7 @@
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
 mutable struct GUIConversation
-  history::Vector{AbstractMessage}
+  history::Vector{Message}
   auto_allowed::Set{String}
   agent_id::String
 end
@@ -29,7 +29,7 @@ const GUI_CONVERSATIONS = Dict{String, GUIConversation}()
 
 function get_gui_conversation(id::String, agent_id::String="prosca")
   get!(GUI_CONVERSATIONS, id) do
-    GUIConversation(AbstractMessage[], Set{String}(), agent_id)
+    GUIConversation(Message[], Set{String}(), agent_id)
   end
 end
 
@@ -230,7 +230,7 @@ function handle_reset(conv_id::Union{String,Nothing}=nothing)
 end
 
 function handle_generate_title(text::String; conversation_id::Union{String,Nothing}=nothing)
-  messages = AbstractMessage[
+  messages = Message[
     SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
     UserMessage(text)
   ]
