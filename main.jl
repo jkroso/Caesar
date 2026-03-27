@@ -1,7 +1,7 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
-@use "github.com/jkroso/LLM.jl/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage
+@use "github.com/jkroso/LLM.jl/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason
 @use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
 @use Logging
@@ -313,20 +313,31 @@ end
 
 
 # ── Tools ────────────────────────────────────────────────────────────
-const TOOLS = Dict{String, Function}()
-const TOOL_SCHEMAS = String[]
+const TOOL_FNS = Dict{String, Function}()
+const TOOL_DEFS = Tool[]
 const TOOL_CONFIRM = Set{String}()
 
+# Built-in tools
+const EVAL_TOOL = Tool("eval", "Evaluate Julia code in the agent's sandboxed REPL. Variables persist across calls.",
+  Dict("type"=>"object", "properties"=>Dict("code"=>Dict("type"=>"string", "description"=>"Julia code to evaluate")), "required"=>["code"]))
+
+const JS_TOOL = Tool("js", "Execute JavaScript in the browser via the GUI sidecar",
+  Dict("type"=>"object", "properties"=>Dict("code"=>Dict("type"=>"string", "description"=>"JavaScript code to execute")), "required"=>["code"]))
+
 function load_tools!()
-  empty!(TOOLS)
-  empty!(TOOL_SCHEMAS)
+  empty!(TOOL_FNS)
+  empty!(TOOL_DEFS)
   empty!(TOOL_CONFIRM)
+  push!(TOOL_DEFS, EVAL_TOOL)
+  push!(TOOL_DEFS, JS_TOOL)
   for file in (HOME*"tools").children
     file.extension == "jl" || continue
     mod = include(string(file))
     n = Base.invokelatest(getfield, mod, :name)
-    TOOLS[n] = Base.invokelatest(getfield, mod, :fn)
-    push!(TOOL_SCHEMAS, "- $(Base.invokelatest(getfield, mod, :schema))")
+    TOOL_FNS[n] = Base.invokelatest(getfield, mod, :fn)
+    desc = Base.invokelatest(getfield, mod, :description)
+    params = Base.invokelatest(getfield, mod, :parameters)
+    push!(TOOL_DEFS, Tool(n, desc, params))
     Base.invokelatest(getfield, mod, :needs_confirm) && push!(TOOL_CONFIRM, n)
   end
 end
@@ -622,22 +633,12 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   $(agent.instructions)
   $memory_section
 
-  ## Julia REPL
-  You have a persistent Julia REPL. Use {"eval": "code"} to evaluate Julia expressions.
-  Variables and functions persist across evaluations.
-  Use standard Julia for introspection: names(@__MODULE__), methods(f), typeof(x), etc.
+  ## Tools
+  Use the `eval` tool to run Julia code in your persistent REPL. Variables and functions survive across calls.
+  Use the `js` tool to execute JavaScript in the browser when the browser skill is active.
 
-  ## Browser JavaScript shorthand
-  When the browser skill is active, use {"js": "code"} to execute JavaScript directly in the browser.
-  This is equivalent to {"eval": "js(b, \"...\")"} but avoids nested escaping issues.
-  The browser variable must be named `b`. Single and double quotes in your JS code are fine.
-
-  ## Built-in Tools
-  Available tools (respond with valid JSON only):
-  $(join(TOOL_SCHEMAS, "\n"))
+  When you have the final answer for the user, respond with plain text (no tool call).
   $skill_list
-  Or {"final_answer": "your response here"}
-
   $skill_injection$handoff_section
   """
 end
@@ -697,7 +698,7 @@ function _process_message(user_input::String, agent::Agent;
   end
 
   memories = search_memories(user_input; agent_id=agent.id, conversation_id)
-  messages = AbstractMessage[SystemMessage(build_system_prompt(agent; active_skill))]
+  messages = Message[SystemMessage(build_system_prompt(agent; active_skill))]
 
   window = agent.history[max(1, end-19):end]
   append!(messages, window)
@@ -714,223 +715,90 @@ function _process_message(user_input::String, agent::Agent;
       end
     end
 
-    response_text = try
+    # Call LLM with tools
+    stream = try
       temperature = get(CONFIG, "temperature", 0.7)
       open(string(agent.path * "last_prompt.md"), "w") do io
         for m in messages
           println(io, "## ", typeof(m).name.name, "\n\n", m isa ToolResultMessage ? m.content : m.text, "\n")
         end
       end
-      stream = agent.llm(Message[m for m in messages]; temperature)
-      buf = IOBuffer()
-      while !eof(stream)
-        chunk = String(readavailable(stream))
-        !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
-      end
-      close(stream)
-      String(take!(buf))
+      agent.llm(Message[m for m in messages]; temperature, tools=TOOL_DEFS)
     catch e
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
       break
     end
-    open(string(agent.path * "last_response.txt"), "w") do io
-      println(io, "length: $(length(response_text))")
-      println(io, response_text)
+
+    # Stream text tokens to outbox
+    buf = IOBuffer()
+    while !eof(stream)
+      chunk = String(readavailable(stream))
+      !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
+    end
+    response_text = String(take!(buf))
+    tool_calls = stream.tool_calls
+    finish_reason = stream.finish_reason
+    close(stream)
+
+    # No tool calls — treat as final text response
+    if isempty(tool_calls)
+      text = strip(response_text)
+      isempty(text) && (step == max_steps && (hit_limit = true); continue)
+      put!(outbox, AgentMessage(text))
+      log_memory("Agent: $text"; agent_id=agent.id, conversation_id)
+      push!(messages, AIMessage(text))
+      break
     end
 
-    json_str = strip(response_text)
-    m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, json_str)
-    if m !== nothing
-      json_str = strip(m.captures[1])
-    end
-    if !startswith(json_str, "{")
-      for line in reverse(split(json_str, '\n'))
-        stripped = strip(line)
-        if startswith(stripped, "{") && endswith(stripped, "}")
-          json_str = stripped
-          break
+    # Process tool calls
+    push!(messages, AIMessage(response_text, tool_calls))
+    for tc in tool_calls
+      result = if tc.name == "eval"
+        code = get(tc.arguments, "code", "")
+        try
+          cd(string(agent.path)) do
+            interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
+          end
+        catch e
+          e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
         end
-      end
-    end
-
-    parsed = try
-      result = parse_json(json_str)
-      result isa AbstractDict ? result : nothing
-    catch
-      # LLMs often produce unescaped newlines inside JSON strings — fix them
-      fixed = replace(json_str, r"(?<!\\)\n" => "\\n")
-      try
-        result = parse_json(fixed)
-        result isa AbstractDict ? result : nothing
-      catch
-        nothing
-      end
-    end
-
-    clean_json = parsed !== nothing ? json(parsed) : json_str
-
-    if parsed === nothing
-      looks_like_json = contains(response_text, "\"tool\"") && contains(response_text, "\"args\"") ||
-                        contains(response_text, "\"eval\"") ||
-                        contains(response_text, "\"js\"") ||
-                        contains(response_text, "\"final_answer\"") ||
-                        contains(response_text, "\"skill\"") ||
-                        contains(response_text, "\"handoff\"")
-      if looks_like_json
-        push!(messages, AIMessage(clean_json))
-        push!(messages, UserMessage("Your JSON was malformed and couldn't be parsed. Return exactly ONE JSON object per response. Try again."))
-        @warn "Malformed JSON from LLM, asking to retry" response_text
-        continue
-      end
-      put!(outbox, AgentMessage(response_text))
-      log_memory("Agent: $response_text"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(response_text))
-      break
-    end
-
-    if haskey(parsed, "final_answer")
-      put!(outbox, AgentMessage(parsed["final_answer"]))
-      log_memory("Agent: $(parsed["final_answer"])"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(parsed["final_answer"]))
-      break
-    end
-
-    if haskey(parsed, "skill")
-      sn = string(parsed["skill"])
-      all_skills = merged_skills(agent)
-      if haskey(all_skills, sn)
-        active_skill = all_skills[sn]
-        @info "LLM activated skill: $sn"
-        messages[1] = SystemMessage(build_system_prompt(agent; active_skill))
-        push!(messages, AIMessage(clean_json))
-        push!(messages, UserMessage("Skill '$sn' activated. Proceed with the task using this skill's guidance."))
-        continue
+      elseif tc.name == "js"
+        js_code = get(tc.arguments, "code", "")
+        try
+          cd(string(agent.path)) do
+            interpret(agent.repl_module, "js(b, $(repr(js_code)))"; outbox, inbox, log=agent.repl_log)
+          end
+        catch e
+          e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+        end
+      elseif haskey(TOOL_FNS, tc.name)
+        # Check confirmation
+        if tc.name in TOOL_CONFIRM && tc.name ∉ auto_allowed
+          req_id = rand(UInt64)
+          put!(outbox, ToolCallRequest(tc.name, json(tc.arguments), req_id))
+          approval = take!(inbox)
+          if approval isa ToolApproval && approval.id == req_id
+            if approval.decision == :always
+              push!(auto_allowed, tc.name)
+            elseif approval.decision == :deny
+              push!(messages, ToolResultMessage(tc.id, "Tool call denied by user."))
+              continue
+            end
+          end
+        end
+        try
+          TOOL_FNS[tc.name](tc.arguments)
+        catch e
+          "Tool error: $(sprint(showerror, e))"
+        end
       else
-        push!(messages, AIMessage(clean_json))
-        push!(messages, UserMessage("Unknown skill '$sn'. Available: $(join(keys(all_skills), ", "))"))
-        continue
-      end
-    end
-
-    if haskey(parsed, "handoff")
-      handoff = parsed["handoff"]
-      to_agent_id = string(get(handoff, "to_agent", ""))
-      reason = string(get(handoff, "reason", ""))
-      context_summary = string(get(handoff, "context", ""))
-
-      if !haskey(AGENTS, to_agent_id)
-        push!(messages, AIMessage(clean_json))
-        available = join([a.id for a in values(AGENTS) if a.id != agent.id], ", ")
-        push!(messages, UserMessage("Unknown agent '$to_agent_id'. Available agents: $available"))
-        continue
+        "Unknown tool '$(tc.name)'"
       end
 
-      new_conv_id = string(UUIDs.uuid4())
-      try
-        SQLite.execute(DB[], """
-          INSERT INTO conversations (id, agent_id, title, handed_off_from, created_at, updated_at)
-          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-        """, (new_conv_id, to_agent_id, "Handoff: $reason", conversation_id))
-        if conversation_id !== nothing
-          SQLite.execute(DB[], "UPDATE conversations SET handed_off_to=?, updated_at=datetime('now') WHERE id=?",
-                         (new_conv_id, conversation_id))
-        end
-      catch e
-        @warn "Failed to record handoff in DB: $e"
-      end
-
-      put!(outbox, AgentMessage("Handing off to **$to_agent_id**: $reason"))
-      log_memory("Handoff to $to_agent_id: $reason\nContext: $context_summary"; agent_id=agent.id, conversation_id)
-      break
+      put!(outbox, ToolResult(tc.name, result))
+      log_memory("$(tc.name): $(first(result, 500))"; agent_id=agent.id, conversation_id)
+      push!(messages, ToolResultMessage(tc.id, result))
     end
-
-    if haskey(parsed, "eval")
-      code = string(parsed["eval"])
-      result = try
-        cd(string(agent.path)) do
-          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
-        end
-      catch e
-        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
-      end
-      put!(outbox, ToolResult("eval", result))
-      log_memory("Eval: $code → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage("", result))
-      continue
-    end
-
-    if haskey(parsed, "js")
-      js_code = string(parsed["js"])
-      code = "js(b, $(repr(js_code)))"
-      result = try
-        cd(string(agent.path)) do
-          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
-        end
-      catch e
-        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
-      end
-      put!(outbox, ToolResult("js", result))
-      log_memory("JS: $(first(js_code, 200)) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage("", result))
-      continue
-    end
-
-    if get(parsed, "index_page", nothing) == true
-      code = "index_page(b)"
-      result = try
-        cd(string(agent.path)) do
-          interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
-        end
-      catch e
-        e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
-      end
-      put!(outbox, ToolResult("index_page", result))
-      log_memory("State: $(first(result, 500))"; agent_id=agent.id, conversation_id)
-      push!(messages, AIMessage(clean_json))
-      push!(messages, ToolResultMessage("", result))
-      continue
-    end
-
-    tool_name = get(parsed, "tool", nothing)
-    tn = tool_name === nothing ? "" : string(tool_name)
-    args_str = haskey(parsed, "args") ? json(parsed["args"]) : "{}"
-
-    if !haskey(TOOLS, tn)
-      push!(messages, AIMessage(clean_json))
-      push!(messages, UserMessage("Error: Unknown tool '$tn'. Use {\"eval\": \"...\"} for Julia code, or use a valid tool name, or return {\"final_answer\": \"...\"}"))
-      continue
-    end
-
-    needs_confirm = tn in TOOL_CONFIRM && tn ∉ auto_allowed
-
-    if needs_confirm
-      req_id = rand(UInt64)
-      put!(outbox, ToolCallRequest(tn, args_str, req_id))
-      approval = take!(inbox)
-      if approval isa ToolApproval && approval.id == req_id
-        if approval.decision == :always
-          push!(auto_allowed, tn)
-        elseif approval.decision == :deny
-          push!(messages, AIMessage(clean_json))
-          push!(messages, UserMessage("Tool call to '$tn' was denied by user. Try a different approach or ask the user."))
-          continue
-        end
-      end
-    end
-
-    result = try
-      TOOLS[tn](parsed["args"])
-    catch e
-      "Tool error ($(typeof(e))): $(sprint(showerror, e))"
-    end
-    @info "Tool result: $(first(result, 200))"
-    put!(outbox, ToolResult(tn, result))
-    log_memory("Tool: $tn($args_str) → $(first(result, 500))"; agent_id=agent.id, conversation_id)
-
-    push!(messages, AIMessage(clean_json))
-    push!(messages, ToolResultMessage("", result))
     step == max_steps && (hit_limit = true)
   end
 
