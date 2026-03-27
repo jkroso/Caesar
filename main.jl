@@ -1,6 +1,5 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
-@use LinearAlgebra...
 @use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
 @use "github.com/jkroso/LLM.jl/pricing" get_pricing token
 @use LibGit2
@@ -17,10 +16,6 @@
 @use "./repl" interpret TRUSTED_MODULES
 @use "./gateway/mail_auth" MailAuth ensure_token!
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
-@use "./ori/engine" Engine init_engine search rebuild! update_note!
-@use "./ori/embeddings" OllamaIndex
-@use "./ori/vault" extract_links
-@use "./ori/types" Note ScoredNote
 
 # ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Caesar")
@@ -32,8 +27,6 @@ const DB = Ref{SQLite.DB}()
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
-const ORI_LOCKS = Dict{String, ReentrantLock}()
-ori_lock(agent_id) = get!(() -> ReentrantLock(), ORI_LOCKS, agent_id)
 
 # Agent → Interface events (per-message outbox)
 struct AgentMessage
@@ -332,22 +325,7 @@ function search_memories(query::String; limit::Int=5,
   entry = get(MEMORY_PROVIDERS, agent_id, nothing)
   entry === nothing && return "(no memories yet)"
   provider, conn = entry
-  if provider == :ori
-    results = lock(ori_lock(agent_id)) do
-      if conversation_id != conn.last_conversation_id
-        empty!(conn.context)
-        conn.last_conversation_id = conversation_id
-      end
-      search(conn, query; top_k=limit)
-    end
-    isempty(results) && return "(no relevant memories)"
-    lines = map(results) do r
-      note = get(conn.notes, r.id, nothing)
-      snippet = note === nothing ? "" : first(note.body, 200)
-      "$(r.title) ($(round(r.score; digits=2))): $snippet"
-    end
-    "=== Relevant memories ===\n" * join(lines, "\n\n")
-  elseif provider == :hindsight
+  if provider == :hindsight
     hs = @use("./memory/hindsight/hindsight")
     results = Base.invokelatest(hs.recall, conn, query; limit)
     isempty(results) && return "(no relevant memories)"
@@ -358,174 +336,6 @@ function search_memories(query::String; limit::Int=5,
   end
 end
 
-const EXTRACTION_MSG_COUNTS = Dict{String, Int}()
-
-function extract_knowledge(messages::Vector, agent_id::String)
-  entry = get(MEMORY_PROVIDERS, agent_id, nothing)
-  entry === nothing && return
-  provider, engine = entry
-  provider == :ori || return
-
-  msg_count = length(messages)
-  last_count = get(EXTRACTION_MSG_COUNTS, agent_id, 0)
-  msg_count <= last_count && return
-  EXTRACTION_MSG_COUNTS[agent_id] = msg_count
-
-  window = get(CONFIG, "extraction_window", 10)
-  recent = messages[max(1, end-window+1):end]
-  conversation = join([string(typeof(m).name.name, ": ", m.content) for m in recent], "\n\n")
-
-  prompt = """You are a knowledge extraction system. Given the following conversation, extract any facts, decisions, or learnings worth remembering long-term.
-
-Return a JSON array. Each element:
-{"title": "Short descriptive title", "body": "Content with [[Wiki Links]] to related concepts", "type": "note|decision|learning|log", "space": "notes|self|ops", "tags": ["optional"]}
-
-Rules:
-- Only extract genuinely noteworthy information, not routine chatter
-- Use [[Wiki Links]] to connect related concepts
-- Classify: "decision" for choices made, "learning" for insights, "note" for facts, "log" for session ops
-- Use "self" space for agent identity/goals, "ops" for session logs, "notes" for everything else
-- Dangling [[Wiki Links]] are fine
-- If nothing noteworthy, return []
-
-Return ONLY a JSON array, no other text."""
-
-  extraction_model = get(CONFIG, "extraction_model", nothing)
-  response = try
-    llm_generate(AbstractMessage[SystemMessage(prompt), UserMessage(conversation)]; model=extraction_model)
-  catch e
-    @warn "Knowledge extraction LLM call failed" exception=e
-    return
-  end
-
-  notes_data = try
-    parse_json(response)
-  catch
-    m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, response)
-    m === nothing && (@warn "Extraction returned invalid JSON"; return)
-    try parse_json(m.captures[1]) catch; @warn "Extraction JSON parse failed"; return end
-  end
-  notes_data isa Vector || (@warn "Extraction returned non-array JSON"; return)
-
-  isempty(notes_data) && return
-
-  updated_ids = String[]
-  for nd in notes_data
-    title = get(nd, "title", nothing)
-    body = get(nd, "body", nothing)
-    (title === nothing || body === nothing) && continue
-    note = update_note!(engine, String(title), String(body);
-                        type=Symbol(get(nd, "type", "note")),
-                        space=Symbol(get(nd, "space", "notes")),
-                        tags=String.(get(nd, "tags", String[])))
-    push!(updated_ids, note.id)
-  end
-
-  isempty(updated_ids) && return
-
-  # Incremental index rebuild
-  notes_vec = collect(values(engine.notes))
-  engine.graph = @use("./ori/graph").build_graph(notes_vec)
-  engine.bm25 = @use("./ori/bm25").build_bm25(notes_vec)
-  engine.bridges = @use("./ori/graph").articulation_points(engine.graph)
-  if engine.semantic isa OllamaIndex
-    @use("./ori/embeddings").embed_new!(engine.semantic, engine.notes)
-  else
-    @use("./ori/tfidf").embed_new!(engine.semantic, engine.notes)
-  end
-
-  # Feed learning
-  for id in updated_ids
-    @use("./ori/vitality").record_access!(engine.db, id)
-  end
-  length(updated_ids) > 1 && @use("./ori/learning").record_cooccurrence!(engine.db, updated_ids)
-
-  @info "Extracted $(length(updated_ids)) knowledge notes for agent=$agent_id"
-end
-
-function consolidate!(engine::Engine, agent_id::String)
-  vitality = @use("./ori/vitality").get_all_vitality(engine.db, engine.graph.incoming)
-  low_ids = [id for (id, v) in vitality if v < 0.3]
-  isempty(low_ids) && return "No low-vitality notes to consolidate."
-
-  low_set = Set(low_ids)
-  visited = Set{String}()
-  clusters = Vector{String}[]
-  for seed in low_ids
-    seed in visited && continue
-    cluster = String[]
-    queue = [(seed, 0)]
-    while !isempty(queue)
-      id, depth = popfirst!(queue)
-      id in visited && continue
-      id in low_set || continue
-      push!(visited, id)
-      push!(cluster, id)
-      depth >= 2 && continue
-      for nb in @use("./ori/graph").neighbors(engine.graph, id)
-        nb in visited || push!(queue, (nb, depth + 1))
-      end
-    end
-    length(cluster) >= 3 && push!(clusters, cluster)
-  end
-
-  consolidated = 0
-  for cluster in clusters
-    bodies = [engine.notes[id].title * ": " * engine.notes[id].body
-              for id in cluster if haskey(engine.notes, id)]
-    isempty(bodies) && continue
-
-    summary = try
-      llm_generate([
-        SystemMessage("Summarize these related knowledge notes into one consolidated note. Preserve key facts and use [[Wiki Links]] to connect to other concepts. Return only the note body text."),
-        UserMessage(join(bodies, "\n\n---\n\n"))
-      ])
-    catch e
-      @warn "Consolidation LLM call failed" exception=e
-      continue
-    end
-
-    titles = [engine.notes[id].title for id in cluster if haskey(engine.notes, id)]
-    consolidated_title = "Consolidated: " * join(titles[1:min(3, end)], ", ")
-    note = update_note!(engine, consolidated_title, summary; type=:note)
-    @use("./ori/vitality").record_access!(engine.db, note.id)
-
-    for id in cluster
-      n = get(engine.notes, id, nothing)
-      n === nothing && continue
-      isfile(n.path) && rm(n.path)
-      delete!(engine.notes, id)
-      SQLite.execute(engine.db, "DELETE FROM vitality WHERE note_id = ?", (id,))
-      SQLite.execute(engine.db, "DELETE FROM qvalues WHERE note_id = ?", (id,))
-      SQLite.execute(engine.db, "DELETE FROM cooccurrence WHERE source_id = ? OR target_id = ?", (id, id))
-    end
-    consolidated += 1
-  end
-
-  for id in low_ids
-    id in visited && continue
-    haskey(engine.notes, id) || continue
-    v = get(vitality, id, 0.5)
-    v >= 0.1 && continue
-    incoming = get(engine.graph.incoming, id, Set{String}())
-    !isempty(incoming) && continue
-    id in engine.bridges && continue
-    n = engine.notes[id]
-    isfile(n.path) && rm(n.path)
-    delete!(engine.notes, id)
-    SQLite.execute(engine.db, "DELETE FROM vitality WHERE note_id = ?", (id,))
-    SQLite.execute(engine.db, "DELETE FROM qvalues WHERE note_id = ?", (id,))
-  end
-
-  consolidated > 0 && rebuild!(engine)
-
-  SQLite.execute(engine.db, """
-    INSERT INTO metadata (key, value) VALUES ('last_consolidated_at', ?)
-    ON CONFLICT(key) DO UPDATE SET value = ?
-  """, (string(Dates.now(Dates.UTC)), string(Dates.now(Dates.UTC))))
-
-  "Consolidated $consolidated clusters, checked $(length(low_ids)) low-vitality notes."
-end
 
 # ── Tools ────────────────────────────────────────────────────────────
 const TOOLS = Dict{String, Function}()
@@ -953,7 +763,10 @@ function _process_message(user_input::String, agent::Agent;
       put!(outbox, AgentMessage("LLM error: $(sprint(showerror, e))"))
       break
     end
-    @debug "LLM response ($(length(response_text)) chars): $(first(response_text, 200))"
+    open(string(agent.path * "last_response.txt"), "w") do io
+      println(io, "length: $(length(response_text))")
+      println(io, response_text)
+    end
 
     json_str = strip(response_text)
     m = match(r"```(?:json)?\s*\n?(.*?)\n?\s*```"s, json_str)
@@ -1169,17 +982,7 @@ function _process_message(user_input::String, agent::Agent;
   entry = get(MEMORY_PROVIDERS, agent.id, nothing)
   if entry !== nothing
     provider, conn = entry
-    if provider == :ori
-      @async begin
-        try
-          lock(ori_lock(agent.id)) do
-            extract_knowledge(messages, agent.id)
-          end
-        catch e
-          @warn "Knowledge extraction failed" exception=e
-        end
-      end
-    elseif provider == :hindsight
+    if provider == :hindsight
       @async begin
         try
           hs = @use("./memory/hindsight/hindsight")
@@ -1303,14 +1106,9 @@ function __init__()
 
   # Initialize memory providers per agent
   for (agent_id, agent) in AGENTS
-    provider_name = get(agent.config, "memory", "ori")
+    provider_name = get(agent.config, "memory", "hindsight")
     try
-      if provider_name == "ori"
-        vault_dir = string(agent.path * "vault")
-        mkpath(vault_dir)
-        MEMORY_PROVIDERS[agent_id] = (:ori, init_engine(vault_dir))
-        @info "Memory: ori for agent=$agent_id"
-      elseif provider_name == "hindsight"
+      if provider_name == "hindsight"
         hs = @use("./memory/hindsight/hindsight")
         llm_key = get(CONFIG, "openai_key", "")
         port = get(CONFIG, "hindsight_port", 8888)
@@ -1327,29 +1125,6 @@ function __init__()
       end
     catch e
       @warn "Memory init failed for agent=$agent_id" exception=e
-    end
-  end
-
-  # Daily consolidation check (Ori agents only)
-  for (agent_id, (provider, conn)) in MEMORY_PROVIDERS
-    provider == :ori || continue
-    try
-      row = SQLite.DBInterface.execute(conn.db,
-        "SELECT value FROM metadata WHERE key = 'last_consolidated_at'") |> collect
-      needs_consolidation = if isempty(row) || row[1].value === missing
-        true
-      else
-        last_run = Dates.DateTime(row[1].value)
-        Dates.now(Dates.UTC) - last_run > Dates.Day(1)
-      end
-      if needs_consolidation
-        lock(ori_lock(agent_id)) do
-          result = consolidate!(conn, agent_id)
-          @info "Consolidation for $agent_id: $result"
-        end
-      end
-    catch e
-      @warn "Consolidation check failed for $agent_id" exception=e
     end
   end
 

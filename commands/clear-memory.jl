@@ -10,23 +10,7 @@ function fn(args::AbstractString)::String
   entry === nothing && return "No memory provider for agent '$agent_id'"
   provider, conn = entry
 
-  if provider == :ori
-    # Delete all vault files and rebuild empty
-    vault_dir = conn.vault_dir
-    for (root, _, files) in walkdir(vault_dir)
-      for f in files
-        f == ".ori.db" && continue
-        rm(joinpath(root, f))
-      end
-    end
-    # Clear DB tables
-    for table in ["vitality", "qvalues", "cooccurrence", "query_log", "metadata"]
-      prosca.SQLite.execute(conn.db, "DELETE FROM $table")
-    end
-    prosca.rebuild!(conn)
-    "Ori vault cleared for agent=$agent_id"
-
-  elseif provider == :hindsight
+  if provider == :hindsight
     hs = prosca.eval(:(@use("./memory/hindsight/hindsight")))
     try
       hs.api(conn, "DELETE", "/banks/$(conn.bank_id)/memories")
@@ -34,7 +18,6 @@ function fn(args::AbstractString)::String
     catch e
       "Failed to clear Hindsight memories: $(sprint(showerror, e))"
     end
-
   else
     "Unknown provider: $provider"
   end
