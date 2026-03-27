@@ -10,13 +10,11 @@ const parameters = Dict(
 const needs_confirm = false
 
 function fn(args)::String
-  @use "github.com/jkroso/HTTP.jl/client" GET
-  @use "github.com/jkroso/JSON.jl" parse_json
-  @use "github.com/jkroso/HTTP.jl" escapeuri
   try
-    url = "https://api.duckduckgo.com/?q=$(escapeuri(args["query"]))&format=json&no_html=1&skip_disambig=1"
-    resp = GET(url)
-    data = parse_json(read(resp, String))
+    query = prosca.HTTP.escapeuri(args["query"])
+    url = "https://api.duckduckgo.com/?q=$query&format=json&no_html=1&skip_disambig=1"
+    resp = prosca.HTTP.GET(url)
+    data = prosca.parse_json(read(resp, String))
     abstract_text = get(data, "Abstract", "")
     topics = join([get(t, "Text", "") for t in get(data, "RelatedTopics", [])], "\n")
     result = "$abstract_text\n\nRelated: $topics"
