@@ -7,6 +7,7 @@ browser-data/
 Project.toml
 agents/*/login/
 agents/*/last_prompt.md
+agents/*/last_response.txt
 agents/*/vault/
 Manifest.toml
 Project.toml
