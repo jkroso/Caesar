@@ -11,3 +11,4 @@ agents/*/last_response.txt
 agents/*/vault/
 Manifest.toml
 Project.toml
+.dippy
