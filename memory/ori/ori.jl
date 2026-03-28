@@ -121,9 +121,19 @@ end
 function recall(conn::OriConn, query::String; limit::Int=5)
   process_running(conn.process) || return Dict{String,Any}[]
   try
-    text = mcp_call_tool(conn, "ori_query_ranked", Dict("query" => query, "top_k" => limit))
+    # Use ori_explore which includes note content snippets
+    text = mcp_call_tool(conn, "ori_explore", Dict("query" => query, "limit" => limit, "include_content" => true))
     text === nothing && return Dict{String,Any}[]
-    [Dict{String,Any}("text" => text)]
+    parsed = try parse_json(text) catch; nothing end
+    parsed === nothing && return [Dict{String,Any}("text" => text)]
+    data = get(parsed, "data", Dict())
+    results = get(data, "results", get(data, "notes", []))
+    isempty(results) && return Dict{String,Any}[]
+    map(results) do r
+      title = get(r, "title", "")
+      snippet = get(r, "snippet", get(r, "content", ""))
+      Dict{String,Any}("text" => isempty(snippet) ? title : "$title: $snippet")
+    end
   catch e
     @warn "Ori recall failed" exception=e
     Dict{String,Any}[]
