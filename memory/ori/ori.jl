@@ -41,6 +41,7 @@ end
 "Call an MCP tool and return the text from the first content block"
 function mcp_call_tool(conn::OriConn, tool_name::String, arguments::Dict=Dict())
   result = mcp_request(conn, "tools/call", Dict("name" => tool_name, "arguments" => arguments))
+  get(result, "isError", false) && (@warn "Ori tool $tool_name failed: $(result)"; return nothing)
   content = get(result, "content", [])
   for block in content
     get(block, "type", "") == "text" && return get(block, "text", "")
