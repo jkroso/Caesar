@@ -18,6 +18,23 @@ function fn(args::AbstractString)::String
     catch e
       "Failed to clear Hindsight memories: $(sprint(showerror, e))"
     end
+  elseif provider == :ori
+    vault_dir = conn.vault_dir
+    notes_dir = joinpath(vault_dir, "notes")
+    inbox_dir = joinpath(vault_dir, "inbox")
+    count = 0
+    for dir in (notes_dir, inbox_dir)
+      isdir(dir) || continue
+      for f in readdir(dir; join=true)
+        endswith(f, ".md") && f != joinpath(notes_dir, "index.md") || continue
+        rm(f)
+        count += 1
+      end
+    end
+    # Clear embedding index
+    db_path = joinpath(vault_dir, ".ori", "embeddings.db")
+    isfile(db_path) && rm(db_path)
+    "Cleared $count notes from Ori vault for agent=$agent_id"
   else
     "Unknown provider: $provider"
   end
