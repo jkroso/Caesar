@@ -1,32 +1,19 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
 import { ChevronDown, Search } from "lucide-react";
-import type { ModelSearchResult } from "@/types/sidecar";
+import type { ModelSearchResult, ProviderInfo } from "@/types/sidecar";
 import { useSidecar } from "@/contexts/SidecarContext";
 import { useSettings } from "@/contexts/SettingsContext";
 
-const PROVIDER_LABELS: Record<string, string> = {
-  xai: "xAI",
-  anthropic: "Anthropic",
-  google: "Google",
-  openai: "OpenAI",
-  mistral: "Mistral",
-  deepseek: "DeepSeek",
-  ollama: "Ollama",
-};
-
-const PROVIDER_ORDER = ["xai", "anthropic", "google", "openai", "mistral", "deepseek", "ollama"];
-
-interface ModelSelectorProps {
+export default function ModelSelector({ value, onChange, className, dropdownPosition = "above" }: {
   value?: string;
   onChange?: (modelId: string) => void;
   className?: string;
   dropdownPosition?: "above" | "below";
-}
-
-export default function ModelSelector({ value, onChange, className, dropdownPosition = "above" }: Partial<ModelSelectorProps> = {}) {
+} = {}) {
   const { send, onEvent } = useSidecar();
   const { config } = useSettings();
   const [results, setResults] = useState<ModelSearchResult[]>([]);
+  const [providerList, setProviderList] = useState<ProviderInfo[]>([]);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
@@ -36,26 +23,25 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const listRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const isControlled = value !== undefined;
+  useEffect(() => {
+    if (value === undefined && config.llm && typeof config.llm === "string") setSelectedId(config.llm);
+  }, [config.llm, value]);
 
   useEffect(() => {
-    if (!isControlled && config.llm && typeof config.llm === "string") {
-      setSelectedId(config.llm);
-    }
-  }, [config.llm, isControlled]);
+    if (value !== undefined) setSelectedId(value || "");
+  }, [value]);
 
-  useEffect(() => {
-    if (isControlled) setSelectedId(value || "");
-  }, [value, isControlled]);
-
-  // Listen for search results from backend
+  // Fetch providers once on mount
   useEffect(() => {
     return onEvent((event: any) => {
-      if (event.type === "model_search_results") {
-        setResults(event.data);
-      }
+      if (event.type === "model_search_results") setResults(event.data);
+      else if (event.type === "providers") setProviderList(event.data);
     });
   }, [onEvent]);
+
+  useEffect(() => {
+    send({ type: "providers_list" });
+  }, [send]);
 
   // Send search when query changes (debounced)
   useEffect(() => {
@@ -81,17 +67,11 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
-  // Focus search when opened
   useEffect(() => {
-    if (open) {
-      searchRef.current?.focus();
-      setHighlightIndex(-1);
-    }
+    if (open) { searchRef.current?.focus(); setHighlightIndex(-1); }
   }, [open]);
 
-  useEffect(() => {
-    setHighlightIndex(-1);
-  }, [results]);
+  useEffect(() => { setHighlightIndex(-1); }, [results]);
 
   const handleSelect = useCallback((model: ModelSearchResult) => {
     setSelectedId(model.id);
@@ -105,7 +85,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     setHighlightIndex(-1);
   }, [send, onChange]);
 
-  // Scroll highlighted item into view
   useEffect(() => {
     if (highlightIndex < 0 || !listRef.current) return;
     const items = listRef.current.querySelectorAll("[data-model-item]");
@@ -126,9 +105,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         break;
       case "Enter":
         e.preventDefault();
-        if (highlightIndex >= 0 && highlightIndex < count) {
-          handleSelect(results[highlightIndex]);
-        }
+        if (highlightIndex >= 0 && highlightIndex < count) handleSelect(results[highlightIndex]);
         break;
       case "Escape":
         e.preventDefault();
@@ -139,24 +116,38 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     }
   };
 
-  // Group by provider
-  const grouped = PROVIDER_ORDER
-    .map((provider) => ({
-      provider,
-      label: PROVIDER_LABELS[provider] || provider,
-      models: results.filter((m) => m.provider === provider),
-    }))
+  // Build provider lookup for logos/names
+  const providerMap = new Map(providerList.map((p) => [p.id, p]));
+
+  // Group results by provider, maintaining provider order from providerList
+  const providerOrder = providerList.length > 0
+    ? providerList.map((p) => p.id)
+    : [...new Set(results.map((r) => r.provider))];
+
+  const grouped = providerOrder
+    .map((pid) => {
+      const info = providerMap.get(pid);
+      return {
+        id: pid,
+        name: info?.name || pid,
+        logo: info?.logo || null,
+        models: results.filter((m) => m.provider === pid),
+      };
+    })
     .filter((g) => g.models.length > 0);
 
-  // Add any providers not in PROVIDER_ORDER
-  const knownProviders = new Set(PROVIDER_ORDER);
-  const extraProviders = [...new Set(results.map(m => m.provider))].filter(p => !knownProviders.has(p));
-  for (const p of extraProviders) {
-    grouped.push({
-      provider: p,
-      label: PROVIDER_LABELS[p] || p,
-      models: results.filter(m => m.provider === p),
-    });
+  // Any providers in results not in providerOrder
+  const knownIds = new Set(providerOrder);
+  for (const r of results) {
+    if (!knownIds.has(r.provider)) {
+      knownIds.add(r.provider);
+      grouped.push({
+        id: r.provider,
+        name: r.provider,
+        logo: null,
+        models: results.filter((m) => m.provider === r.provider),
+      });
+    }
   }
 
   const getItemIndex = (model: ModelSearchResult) => results.indexOf(model);
@@ -174,7 +165,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`absolute ${dropdownPosition === "above" ? "bottom-[calc(100%+4px)]" : "top-[calc(100%+4px)]"} left-0 w-80 max-h-[400px] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-xl shadow-lg z-[100] flex flex-col overflow-hidden`}>
+        <div className={`absolute ${dropdownPosition === "above" ? "bottom-[calc(100%+4px)]" : "top-[calc(100%+4px)]"} right-0 w-80 max-h-[400px] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-xl shadow-lg z-[100] flex flex-col overflow-hidden`}>
           <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)] text-[var(--color-text-muted)]">
             <Search size={12} />
             <input
@@ -189,9 +180,14 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
           </div>
           <div className="overflow-y-auto max-h-[350px] py-1" ref={listRef} role="listbox">
             {grouped.map((group) => (
-              <div key={group.provider}>
-                <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
-                  {group.label}
+              <div key={group.id}>
+                <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
+                  {group.logo && (
+                    <img src={group.logo} alt="" className="w-3.5 h-3.5" />
+                  )}
+                  <span className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+                    {group.name}
+                  </span>
                 </div>
                 {group.models.map((m) => {
                   const idx = getItemIndex(m);
@@ -234,7 +230,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
             ))}
             {results.length === 0 && (
               <div className="p-3 text-xs text-[var(--color-text-muted)] text-center">
-                {search ? "No models found" : "Type to search models..."}
+                {search ? "No models found" : "Loading..."}
               </div>
             )}
           </div>

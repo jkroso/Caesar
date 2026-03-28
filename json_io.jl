@@ -97,12 +97,28 @@ end
 function handle_model_search(query::String)
   allowed = get(CONFIG, "providers", nothing)
   results = if allowed isa Vector
-    providers = Set(string.(allowed))
-    filter(r -> _matches_provider_filter(r, providers), search_models(query; max_results=100))[1:min(end, 20)]
+    search_models(query; provider=string.(allowed), max_results=20)
   else
     search_models(query; max_results=20)
   end
   emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
+end
+
+function handle_providers_list()
+  allowed = get(CONFIG, "providers", nothing)
+  result = if allowed isa Vector
+    ids = string.(allowed)
+    try providers(ids) catch; search_providers(ids) end
+  else
+    search_providers()
+  end
+  # Strip models from provider data (too large), just send metadata
+  data = [Dict{String,Any}(
+    "id" => get(p, "id", ""),
+    "name" => get(p, "name", ""),
+    "logo" => let l = get(p, "logo", nothing); l !== nothing && isfile(l) ? "data:image/svg+xml;base64," * Base64.base64encode(read(l)) : nothing end
+  ) for p in result]
+  emit(Dict("type" => "providers", "data" => data))
 end
 
 function handle_reset(conv_id::Union{String,Nothing}=nothing)
@@ -857,6 +873,8 @@ while !eof(stdin)
       handle_skills_list()
     elseif msg_type == "model_search"
       @async handle_model_search(string(get(msg, "query", "")))
+    elseif msg_type == "providers_list"
+      @async handle_providers_list()
     elseif msg_type == "reset"
       handle_reset(conv_id)
     elseif msg_type == "restore_context"

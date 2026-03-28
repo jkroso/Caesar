@@ -1,8 +1,8 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
-@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama search_models
+@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama search_models search_providers
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
-@use "github.com/jkroso/LLM.jl/models" get_pricing token
+@use "github.com/jkroso/LLM.jl/models" get_pricing token providers
 @use LibGit2
 @use Logging
 @use SQLite
@@ -278,13 +278,6 @@ function route_notification(router::PresenceRouter, text::String;
     end
   end
 end
-"Check if a model result matches the configured provider filter"
-function _matches_provider_filter(r, allowed::Set{String})
-  r["provider"] in allowed && return true
-  id = get(r, "id", "")
-  any(a -> startswith(id, a * "/"), allowed)
-end
-
 "Send messages to the default LLM and return the full response text"
 function llm_generate(messages::Vector; model::Union{String,Nothing}=nothing)::String
   llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)

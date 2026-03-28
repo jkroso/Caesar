@@ -14,6 +14,7 @@ export type SidecarEvent =
   | { type: "skills"; data: SkillInfo[] }
   | { type: "models"; data: ModelInfo[] }
   | { type: "model_search_results"; data: ModelSearchResult[]; query: string }
+  | { type: "providers"; data: ProviderInfo[] }
   | WithConversationId<{ type: "title"; title: string }>
   | { type: "projects"; data: ProjectInfo[] }
   | { type: "routines"; data: RoutineInfo[] }
@@ -71,6 +72,12 @@ export interface ModelSearchResult {
   tool_call: boolean;
   context: number | null;
   cost: { input?: number; output?: number } | null;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  logo: string | null; // base64 data URI for SVG logo
 }
 
 export type SidecarStatus = "disconnected" | "starting" | "ready" | "error";
