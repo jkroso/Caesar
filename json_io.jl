@@ -97,7 +97,9 @@ end
 function handle_model_search(query::String)
   allowed = get(CONFIG, "providers", nothing)
   results = if allowed isa Vector
-    search_models(query; provider=string.(allowed), max_results=20)
+    ids = string.(allowed)
+    all_results = search_models(query; provider=ids, max_results=50)
+    filter(m -> get(m, "provider", "") in ids, all_results)[1:min(20, end)]
   else
     search_models(query; max_results=20)
   end
@@ -108,7 +110,8 @@ function handle_providers_list()
   allowed = get(CONFIG, "providers", nothing)
   result = if allowed isa Vector
     ids = string.(allowed)
-    try providers(ids) catch; search_providers(ids) end
+    all_providers = try providers(ids) catch; search_providers(ids) end
+    filter(p -> get(p, "id", "") in ids, all_providers)
   else
     search_providers()
   end
