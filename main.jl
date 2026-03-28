@@ -1006,7 +1006,7 @@ function __init__()
       elseif provider_name == "ori"
         ori = @use("./memory/ori/ori")
         ori_config = get(agent.config, "ori", Dict())
-        vault_dir = String(agent.path * get(ori_config, "vault_dir", "vault"))
+        vault_dir = string(agent.path * get(ori_config, "vault_dir", "vault"))
         cmd = get(ori_config, "command", "npx")
         conn = Base.invokelatest(ori.init, agent_id; vault_dir, command=cmd)
         if conn !== nothing
