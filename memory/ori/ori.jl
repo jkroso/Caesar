@@ -127,19 +127,21 @@ function recall(conn::OriConn, query::String; limit::Int=5)
     parsed === nothing && return Dict{String,Any}[]
     results = get(get(parsed, "data", Dict()), "results", [])
     isempty(results) && return Dict{String,Any}[]
-    # Read note content from vault files
+    # Read note content from vault files, filtering low-score and template notes
     out = Dict{String,Any}[]
     for r in results
+      score = get(r, "score", 0.0)
+      score < 0.1 && continue
       slug = get(r, "title", "")
-      isempty(slug) && continue
-      # Try notes/ directory first, then self/
+      (isempty(slug) || slug == "index") && continue
       content = nothing
       for dir in ("notes", "self", "ops")
         path = joinpath(conn.vault_dir, dir, "$slug.md")
         if isfile(path)
           raw = read(path, String)
           # Strip YAML frontmatter
-          body = replace(raw, r"^---\n.*?\n---\n*"s => "")
+          m = match(r"^---\s*\n.*?\n---\s*\n"s, raw)
+          body = m !== nothing ? raw[m.offset+length(m.match):end] : raw
           content = strip(first(body, 300))
           break
         end
