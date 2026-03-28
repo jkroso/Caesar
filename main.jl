@@ -306,6 +306,12 @@ function search_memories(query::String; limit::Int=5,
     isempty(results) && return "(no relevant memories)"
     lines = [get(r, "text", "") for r in results]
     "=== Relevant memories ===\n" * join(lines, "\n\n")
+  elseif provider == :ori
+    ori = @use("./memory/ori/ori")
+    results = Base.invokelatest(ori.recall, conn, query; limit)
+    isempty(results) && return "(no relevant memories)"
+    lines = [get(r, "text", "") for r in results]
+    "=== Relevant memories ===\n" * join(lines, "\n\n")
   else
     "(unknown memory provider)"
   end
@@ -858,6 +864,24 @@ function _process_message(user_input::String, agent::Agent;
           @warn "Hindsight retain failed" exception=e
         end
       end
+    elseif provider == :ori
+      @async begin
+        try
+          ori = @use("./memory/ori/ori")
+          last_response = ""
+          for i in length(messages):-1:1
+            if messages[i] isa AIMessage
+              last_response = messages[i].text
+              break
+            end
+          end
+          Base.invokelatest(ori.retain, conn,
+            "User: $user_input\n\nAssistant: $last_response";
+            context="conversation turn")
+        catch e
+          @warn "Ori retain failed" exception=e
+        end
+      end
     end
   end
 end
@@ -978,6 +1002,18 @@ function __init__()
           @info "Memory: hindsight for agent=$agent_id"
         else
           @warn "Hindsight init failed for agent=$agent_id, running without memory"
+        end
+      elseif provider_name == "ori"
+        ori = @use("./memory/ori/ori")
+        ori_config = get(agent.config, "ori", Dict())
+        vault_dir = String(agent.path * get(ori_config, "vault_dir", "vault"))
+        cmd = get(ori_config, "command", "npx")
+        conn = Base.invokelatest(ori.init, agent_id; vault_dir, command=cmd)
+        if conn !== nothing
+          MEMORY_PROVIDERS[agent_id] = (:ori, conn)
+          @info "Memory: ori for agent=$agent_id vault=$vault_dir"
+        else
+          @warn "Ori init failed for agent=$agent_id, running without memory"
         end
       else
         @warn "Unknown memory provider '$provider_name' for agent=$agent_id"
