@@ -49,7 +49,7 @@ function mcp_call_tool(conn::OriConn, tool_name::String, arguments::Dict=Dict())
   nothing
 end
 
-function init(agent_id; vault_dir, command="npx")
+function init(agent_id; vault_dir, command="npx", personality="")
   mkpath(vault_dir)
   # Initialize vault if not already initialized (creates .ori marker, inbox/, notes/, etc.)
   if !isdir(joinpath(vault_dir, ".ori"))
@@ -58,6 +58,18 @@ function init(agent_id; vault_dir, command="npx")
     try run(init_cmd) catch e
       @warn "Ori vault init failed" exception=e
       return nothing
+    end
+    # Pre-populate identity so Ori skips its onboarding flow
+    if !isempty(personality)
+      identity_path = joinpath(vault_dir, "self", "identity.md")
+      open(identity_path, "w") do io
+        println(io, "---")
+        println(io, "description: Agent identity — who you are, how you work, what you value")
+        println(io, "type: self")
+        println(io, "---\n")
+        println(io, "# Identity\n")
+        print(io, personality)
+      end
     end
   end
   cmd = command == "npx" ? `npx -y ori-memory serve --mcp --vault $vault_dir` :

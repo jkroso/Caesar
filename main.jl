@@ -1008,7 +1008,7 @@ function __init__()
         ori_config = get(agent.config, "ori", Dict())
         vault_dir = string(agent.path * get(ori_config, "vault_dir", "vault"))
         cmd = get(ori_config, "command", "npx")
-        conn = Base.invokelatest(ori.init, agent_id; vault_dir, command=cmd)
+        conn = Base.invokelatest(ori.init, agent_id; vault_dir, command=cmd, personality=agent.personality)
         if conn !== nothing
           MEMORY_PROVIDERS[agent_id] = (:ori, conn)
           @info "Memory: ori for agent=$agent_id vault=$vault_dir"
