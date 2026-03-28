@@ -121,19 +121,33 @@ end
 function recall(conn::OriConn, query::String; limit::Int=5)
   process_running(conn.process) || return Dict{String,Any}[]
   try
-    # Use ori_explore which includes note content snippets
-    text = mcp_call_tool(conn, "ori_explore", Dict("query" => query, "limit" => limit, "include_content" => true))
+    text = mcp_call_tool(conn, "ori_query_ranked", Dict("query" => query, "limit" => limit))
     text === nothing && return Dict{String,Any}[]
     parsed = try parse_json(text) catch; nothing end
-    parsed === nothing && return [Dict{String,Any}("text" => text)]
-    data = get(parsed, "data", Dict())
-    results = get(data, "results", get(data, "notes", []))
+    parsed === nothing && return Dict{String,Any}[]
+    results = get(get(parsed, "data", Dict()), "results", [])
     isempty(results) && return Dict{String,Any}[]
-    map(results) do r
-      title = get(r, "title", "")
-      snippet = get(r, "snippet", get(r, "content", ""))
-      Dict{String,Any}("text" => isempty(snippet) ? title : "$title: $snippet")
+    # Read note content from vault files
+    out = Dict{String,Any}[]
+    for r in results
+      slug = get(r, "title", "")
+      isempty(slug) && continue
+      # Try notes/ directory first, then self/
+      content = nothing
+      for dir in ("notes", "self", "ops")
+        path = joinpath(conn.vault_dir, dir, "$slug.md")
+        if isfile(path)
+          raw = read(path, String)
+          # Strip YAML frontmatter
+          body = replace(raw, r"^---\n.*?\n---\n*"s => "")
+          content = strip(first(body, 300))
+          break
+        end
+      end
+      title = replace(slug, "-" => " ")
+      push!(out, Dict{String,Any}("text" => content !== nothing ? "$title: $content" : title))
     end
+    out
   catch e
     @warn "Ori recall failed" exception=e
     Dict{String,Any}[]
