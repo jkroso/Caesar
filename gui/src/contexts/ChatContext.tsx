@@ -68,7 +68,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
 interface ChatContextValue {
   messages: ChatMessage[];
   agentBusy: boolean;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, attachments?: import("@/types/message").Attachment[]) => void;
   approveToolCall: (id: string, decision: "allow" | "deny" | "always") => void;
   clearChat: () => void;
 }
@@ -209,7 +209,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
               if (convId) {
                 const conv = conversationsRef.current.find((c) => c.id === convId);
                 const agentId = conv?.agentId ?? "prosca";
-                send({ type: "user_message", text: nextQueued.text, conversation_id: convId, agent_id: agentId });
+                const dqPayload: Record<string, unknown> = { type: "user_message", text: nextQueued.text, conversation_id: convId, agent_id: agentId };
+                if (nextQueued.attachments?.length) {
+                  dqPayload.attachments = nextQueued.attachments.map(a => ({ mime: a.mime, data: a.data }));
+                }
+                send(dqPayload);
               }
             } else if (eventConvId) {
               setBusy(eventConvId, false);
@@ -243,12 +247,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, [onEvent]);
 
   const sendMessage = useCallback(
-    (text: string) => {
+    (text: string, attachments?: import("@/types/message").Attachment[]) => {
+      const atts = attachments?.length ? attachments : undefined;
       // Auto-create a conversation if none is active
       if (!activeId) {
         createConversation();
-        // The conversation will be created asynchronously; queue the message for now
-        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now(), queued: true } });
+        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now(), queued: true, attachments: atts } });
         dispatch({ type: "increment_pending" });
         return;
       }
@@ -257,14 +261,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const agentId = activeConversation?.agentId ?? "prosca";
       const busy = stateRef.current.pendingCount > 0;
       if (busy) {
-        // Queue: show message in UI but don't send to backend yet
-        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now(), queued: true } });
+        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now(), queued: true, attachments: atts } });
       } else {
-        // Send immediately
-        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now() } });
+        dispatch({ type: "add_message", message: { role: "user", text, timestamp: Date.now(), attachments: atts } });
         dispatch({ type: "increment_pending" });
         setBusy(convId, true);
-        send({ type: "user_message", text, conversation_id: convId, agent_id: agentId });
+        const payload: Record<string, unknown> = { type: "user_message", text, conversation_id: convId, agent_id: agentId };
+        if (atts) {
+          payload.attachments = atts.map(a => ({ mime: a.mime, data: a.data }));
+        }
+        send(payload);
       }
     },
     [send, activeId, conversations, createConversation, setBusy]
