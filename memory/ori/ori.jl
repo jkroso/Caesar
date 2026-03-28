@@ -102,10 +102,15 @@ end
 function retain(conn::OriConn, content::String; context=nothing)
   process_running(conn.process) || return false
   try
-    args = Dict{String,Any}("content" => content)
-    context !== nothing && (args["context"] = string(context))
+    # ori_add requires title; use first line as title, rest as body
+    lines = split(content, '\n'; limit=2)
+    title = strip(first(lines))
+    isempty(title) && return false
+    body = length(lines) > 1 ? strip(lines[2]) : ""
+    args = Dict{String,Any}("title" => title)
+    isempty(body) || (args["content"] = body)
+    # ori_add auto-promotes when vault config has promote.auto: true (default)
     mcp_call_tool(conn, "ori_add", args)
-    mcp_call_tool(conn, "ori_promote", Dict())
     true
   catch e
     @warn "Ori retain failed" exception=e
