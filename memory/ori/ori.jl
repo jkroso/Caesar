@@ -53,9 +53,9 @@ function init(agent_id; vault_dir, command="npx", personality="")
   mkpath(vault_dir)
   # Initialize vault if not already initialized (creates .ori marker, inbox/, notes/, etc.)
   if !isdir(joinpath(vault_dir, ".ori"))
-    init_cmd = command == "npx" ? `npx -y ori-memory init $vault_dir` :
-                                  `$command init $vault_dir`
-    try run(init_cmd) catch e
+    init_cmd = command == "npx" ? `npx -y ori-memory init --json $vault_dir` :
+                                  `$command init --json $vault_dir`
+    try run(pipeline(init_cmd; stdout=devnull)) catch e
       @warn "Ori vault init failed" exception=e
       return nothing
     end
