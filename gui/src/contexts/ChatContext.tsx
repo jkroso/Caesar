@@ -100,8 +100,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       prevActiveId.current = activeId;
 
       // If transitioning from no conversation (null) to a new one,
-      // keep current messages — they belong to this new conversation
+      // keep current messages and send any queued ones
       if (wasNull && activeId) {
+        const queued = stateRef.current.messages.find(
+          (m): m is Extract<ChatMessage, { role: "user" }> => m.role === "user" && !!m.queued
+        );
+        if (queued) {
+          dispatch({ type: "dequeue_next" });
+          const conv = conversationsRef.current.find((c) => c.id === activeId);
+          const agentId = conv?.agentId ?? "prosca";
+          const payload: Record<string, unknown> = { type: "user_message", text: queued.text, conversation_id: activeId, agent_id: agentId };
+          if (queued.attachments?.length) {
+            payload.attachments = queued.attachments.map(a => ({ mime: a.mime, data: a.data }));
+          }
+          send(payload);
+          setBusy(activeId, true);
+        }
         return;
       }
 
