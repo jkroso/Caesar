@@ -26,7 +26,7 @@ function mcp_request(conn::OriConn, method::String, params::Dict=Dict())
     end
     resp = try parse_json(line) catch; continue end
     haskey(resp, "id") || continue  # skip server notifications
-    resp["id"] == id || continue     # skip mismatched ids
+    Int(resp["id"]) == id || continue  # skip mismatched ids (JSON parses numbers as Float32)
     haskey(resp, "error") && error("MCP error: $(resp["error"])")
     return get(resp, "result", Dict())
   end
