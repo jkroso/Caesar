@@ -2,50 +2,14 @@ module model_cmd
 const prosca = parentmodule(@__MODULE__)
 
 const name = "model"
-const description = "Switch LLM model and provider"
-
-# Provider → (name, prefix, env_var, config_key, models)
-const PROVIDERS = [
-  ("Ollama (local)", :ollama, nothing, nothing, ["qwen3.5:35b", "qwen3.5:27b", "llama3.3:70b", "gemma3:27b", "deepseek-r1:32b"]),
-  ("OpenAI", :openai, "OPENAI_API_KEY", "openai_key", ["gpt-5.4"]),
-  ("Anthropic", :anthropic, "ANTHROPIC_API_KEY", "anthropic_key", ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"]),
-  ("Google Gemini", :google, "GOOGLE_API_KEY", "google_key", ["gemini-2.5-pro", "gemini-2.5-flash"]),
-  ("Mistral", :mistral, "MISTRAL_API_KEY", "mistral_key", ["mistral-large-latest", "mistral-medium-latest"]),
-  ("DeepSeek", :deepseek, "DEEPSEEK_API_KEY", "deepseek_key", ["deepseek-chat", "deepseek-reasoner"]),
-  ("xAI", :xai, "XAI_API_KEY", "xai_key", ["grok-code-fast-1", "grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning"]),
-]
-
-# Flat list of all model names for autocomplete
-const ALL_MODELS = String[]
-for (_, _, _, _, models) in PROVIDERS
-  append!(ALL_MODELS, models)
-end
-
-"Find which provider a model belongs to"
-function find_provider(model_name::AbstractString)
-  for (pname, ptype, env_var, config_key, models) in PROVIDERS
-    model_name in models && return (pname, ptype, env_var, config_key)
-  end
-  ("Ollama (local)", :ollama, nothing, nothing)
-end
+const description = "Switch LLM model or search available models"
 
 function fn(args::AbstractString)::String
-  model_name = String(strip(args))
-
-  if isempty(model_name)
-    lines = ["Current: $(prosca.CONFIG["llm"])", "", "Usage: /model <name>", "", "Available models:"]
-    for (pname, _, _, _, models) in PROVIDERS
-      push!(lines, "  $pname:")
-      for m in models
-        push!(lines, "    $m")
-      end
-    end
-    return join(lines, "\n")
-  end
+  query = String(strip(args))
 
   # Handle "key:<api_key>" to set a provider key
-  if startswith(model_name, "key:")
-    kv = model_name[5:end]
+  if startswith(query, "key:")
+    kv = query[5:end]
     eq = findfirst('=', kv)
     eq === nothing && return "Usage: /model key:<config_key>=<value>"
     k, v = strip(kv[1:eq-1]), strip(kv[eq+1:end])
@@ -54,19 +18,52 @@ function fn(args::AbstractString)::String
     return "Saved $k to config."
   end
 
-  pname, _, env_var, config_key = find_provider(model_name)
-
-  if env_var !== nothing
-    existing_key = get(prosca.CONFIG, config_key, "")
-    if isempty(existing_key) && !haskey(ENV, env_var)
-      return "Missing API key. Set it with: /model key:$config_key=<your-key>"
-    end
+  # No argument: show current model
+  if isempty(query)
+    return "Current: $(prosca.CONFIG["llm"])\n\nUsage: /model <name or search query>"
   end
 
-  prosca.CONFIG["llm"] = model_name
-  save_config!()
+  # Search for models matching the query
+  results = prosca.search_models(query; max_results=10)
 
-  "Switched to $model_name ($pname)"
+  # Exact match → switch to it
+  exact = findfirst(r -> r["id"] == query, results)
+  if exact !== nothing
+    prosca.CONFIG["llm"] = query
+    save_config!()
+    return "Switched to $query ($(results[exact]["provider"]))"
+  end
+
+  # Single result → switch to it
+  if length(results) == 1
+    id = results[1]["id"]
+    prosca.CONFIG["llm"] = id
+    save_config!()
+    return "Switched to $id ($(results[1]["provider"]))"
+  end
+
+  # Multiple results → show list
+  if isempty(results)
+    # Try switching directly (e.g. for ollama models not in models.dev)
+    prosca.CONFIG["llm"] = query
+    save_config!()
+    return "Switched to $query"
+  end
+
+  lines = ["Models matching \"$query\":", ""]
+  for r in results
+    cost = r["cost"]
+    cost_str = cost !== nothing ? " [\$$(get(cost, "input", "?"))/\$$(get(cost, "output", "?")) per Mtok]" : ""
+    ctx = r["context"]
+    ctx_str = ctx !== nothing ? " $(div(ctx, 1000))k ctx" : ""
+    flags = String[]
+    r["reasoning"] && push!(flags, "reasoning")
+    r["tool_call"] && push!(flags, "tools")
+    flag_str = isempty(flags) ? "" : " ($(join(flags, ", ")))"
+    push!(lines, "  $(r["id"])$flag_str$ctx_str$cost_str")
+  end
+  push!(lines, "", "Use /model <id> to switch")
+  join(lines, "\n")
 end
 
 function save_config!()

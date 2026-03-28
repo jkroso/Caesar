@@ -117,12 +117,9 @@ function gather_completions(prefix::String)::Vector{String}
   results = String[]
   if startswith(prefix, "/model ")
     partial = strip(prefix[8:end])
-    model_mod = get(COMMANDS, "model", nothing)
-    if model_mod !== nothing && isdefined(model_mod, :PROVIDERS)
-      for (_, _, _, _, models) in model_mod.PROVIDERS
-        for m in models
-          startswith(m, partial) && push!(results, "/model " * m)
-        end
+    if !isempty(partial)
+      for m in search_models(partial; max_results=10)
+        push!(results, "/model " * m["id"])
       end
     end
   elseif startswith(prefix, "/")

@@ -1,8 +1,8 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
-@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama
+@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama search_models
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
-@use "github.com/jkroso/LLM.jl/pricing" get_pricing token
+@use "github.com/jkroso/LLM.jl/models" get_pricing token
 @use LibGit2
 @use Logging
 @use SQLite
