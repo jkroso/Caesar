@@ -1,5 +1,4 @@
-@use "github.com/jkroso/JSON.jl" parse_json
-@use "github.com/jkroso/JSON.jl/write" json
+@use "github.com/jkroso/JSON.jl" parse_json json
 @use Logging
 
 mutable struct OriConn
@@ -51,6 +50,15 @@ end
 
 function init(agent_id; vault_dir, command="npx")
   mkpath(vault_dir)
+  # Initialize vault if not already initialized (creates .ori marker, inbox/, notes/, etc.)
+  if !isdir(joinpath(vault_dir, ".ori"))
+    init_cmd = command == "npx" ? `npx -y ori-memory init $vault_dir` :
+                                  `$command init $vault_dir`
+    try run(init_cmd) catch e
+      @warn "Ori vault init failed" exception=e
+      return nothing
+    end
+  end
   cmd = command == "npx" ? `npx -y ori-memory serve --mcp --vault $vault_dir` :
                            `$command serve --mcp --vault $vault_dir`
   local proc, input, output
