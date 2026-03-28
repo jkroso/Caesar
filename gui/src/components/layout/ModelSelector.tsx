@@ -1,26 +1,20 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
 import { ChevronDown, Search } from "lucide-react";
-import type { ModelInfo } from "@/types/sidecar";
+import type { ModelSearchResult } from "@/types/sidecar";
 import { useSidecar } from "@/contexts/SidecarContext";
 import { useSettings } from "@/contexts/SettingsContext";
 
 const PROVIDER_LABELS: Record<string, string> = {
-  xai: "xAI (Grok)",
+  xai: "xAI",
   anthropic: "Anthropic",
-  google: "Google (Gemini)",
+  google: "Google",
   openai: "OpenAI",
-  ollama: "Local (Ollama)",
+  mistral: "Mistral",
+  deepseek: "DeepSeek",
+  ollama: "Ollama",
 };
 
-const PROVIDER_ORDER = ["xai", "anthropic", "google", "openai", "ollama"];
-
-const CAPABILITIES = [
-  { key: "text", label: "Text" },
-  { key: "image", label: "Image" },
-  { key: "coding", label: "Coding" },
-  { key: "reasoning", label: "Reasoning" },
-  { key: "tool", label: "Tools" },
-] as const;
+const PROVIDER_ORDER = ["xai", "anthropic", "google", "openai", "mistral", "deepseek", "ollama"];
 
 interface ModelSelectorProps {
   value?: string;
@@ -29,18 +23,18 @@ interface ModelSelectorProps {
   dropdownPosition?: "above" | "below";
 }
 
-export default function ModelSelector({ value, onChange, className, dropdownPosition = "above" }: ModelSelectorProps = {}) {
-  const { send } = useSidecar();
+export default function ModelSelector({ value, onChange, className, dropdownPosition = "above" }: Partial<ModelSelectorProps> = {}) {
+  const { send, onEvent } = useSidecar();
   const { config } = useSettings();
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [results, setResults] = useState<ModelSearchResult[]>([]);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
   const [highlightIndex, setHighlightIndex] = useState(-1);
-  const [activeFilters, setActiveFilters] = useState<string[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isControlled = value !== undefined;
 
@@ -51,77 +45,27 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   }, [config.llm, isControlled]);
 
   useEffect(() => {
-    if (isControlled) {
-      setSelectedId(value || "");
-    }
+    if (isControlled) setSelectedId(value || "");
   }, [value, isControlled]);
 
-  const fetched = useRef(false);
+  // Listen for search results from backend
   useEffect(() => {
-    if (open && !fetched.current) {
-      fetched.current = true;
-      fetch("/api.json")
-        .then((r) => r.json())
-        .then((data) => {
-          const allModels: ModelInfo[] = [];
-          Object.entries(data).forEach(([prov, pData]) => {
-            if (pData && typeof pData === "object" && "models" in pData) {
-              const modelsObj = (pData as any).models;
-              Object.entries(modelsObj).forEach(([k, mData]) => {
-                const m = mData as any;
-                allModels.push({
-                  id: m.id || k,
-                  name: m.name || k,
-                  provider: prov,
-                  family: m.family,
-                  release_date: m.release_date || m.last_updated,
-                  modalities: m.modalities,
-                  reasoning: m.reasoning,
-                  tool_call: m.tool_call,
-                  cost: m.cost,
-                });
-              });
-            }
-          });
-          return allModels;
-        })
-        .then((allModels) => {
-          return fetch("http://localhost:11434/api/tags")
-            .then((r) => (r.ok ? r.json() : { models: [] }))
-            .catch(() => ({ models: [] }))
-            .then((ollamaData) => {
-              if (ollamaData.models) {
-                ollamaData.models.forEach((om: any) => {
-                  allModels.push({
-                    id: `ollama:${om.name}`,
-                    name: om.name,
-                    provider: "ollama",
-                    family: "ollama",
-                  });
-                });
-              }
-              let filtered = allModels.filter((m) => m.provider !== "openrouter" && m.provider !== "ollama-cloud");
-              const groups = new Map<string, ModelInfo[]>();
-              filtered.forEach((m) => {
-                const fam = m.provider === "ollama" ? m.id : (m.family || "other");
-                const key = m.provider + "|" + fam;
-                if (!groups.has(key)) groups.set(key, []);
-                groups.get(key)!.push(m);
-              });
-              const latest: ModelInfo[] = [];
-              groups.forEach((group) => {
-                group.sort((a: ModelInfo, b: ModelInfo) => {
-                  const da = a.release_date ? new Date(a.release_date).getTime() : 0;
-                  const db = b.release_date ? new Date(b.release_date).getTime() : 0;
-                  return db - da;
-                });
-                latest.push(group[0]);
-              });
-              setModels(latest);
-            });
-        });
-    }
-  }, [open]);
+    return onEvent((event: any) => {
+      if (event.type === "model_search_results") {
+        setResults(event.data);
+      }
+    });
+  }, [onEvent]);
+
+  // Send search when query changes (debounced)
+  useEffect(() => {
+    if (!open) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      send({ type: "model_search", query: search || "" });
+    }, search ? 150 : 0);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [search, open, send]);
 
   // Close on outside click
   useEffect(() => {
@@ -145,31 +89,11 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     }
   }, [open]);
 
-  const searchFiltered = search
-    ? models.filter((m) =>
-        m.name.toLowerCase().includes(search.toLowerCase()) ||
-        m.id.toLowerCase().includes(search.toLowerCase())
-      )
-    : models;
-  const filtered = activeFilters.length === 0
-    ? searchFiltered
-    : searchFiltered.filter((m) => activeFilters.every((f) => {
-        if (f === "text") return m.modalities?.input?.includes("text") ?? true;
-        if (f === "image") return m.modalities?.input?.some((i) => ["image", "vision"].includes(i)) ?? false;
-        if (f === "coding") return m.name.toLowerCase().includes("code") || (m.tool_call ?? false);
-        if (f === "reasoning") return m.reasoning ?? false;
-        if (f === "tool") return m.tool_call ?? false;
-        return true;
-      }));
-
-  // Build flat list for keyboard nav
-  const flatItems = filtered;
-
   useEffect(() => {
     setHighlightIndex(-1);
-  }, [search, activeFilters]);
+  }, [results]);
 
-  const handleSelect = useCallback((model: ModelInfo) => {
+  const handleSelect = useCallback((model: ModelSearchResult) => {
     setSelectedId(model.id);
     if (onChange) {
       onChange(model.id);
@@ -181,12 +105,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     setHighlightIndex(-1);
   }, [send, onChange]);
 
-  const toggleFilter = useCallback((key: string) => {
-    setActiveFilters((prev) =>
-      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
-    );
-  }, []);
-
   // Scroll highlighted item into view
   useEffect(() => {
     if (highlightIndex < 0 || !listRef.current) return;
@@ -195,9 +113,8 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   }, [highlightIndex]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    const count = flatItems.length;
+    const count = results.length;
     if (!count) return;
-
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();
@@ -207,18 +124,10 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         e.preventDefault();
         setHighlightIndex((prev) => (prev <= 0 ? count - 1 : prev - 1));
         break;
-      case "Home":
-        e.preventDefault();
-        setHighlightIndex(0);
-        break;
-      case "End":
-        e.preventDefault();
-        setHighlightIndex(count - 1);
-        break;
       case "Enter":
         e.preventDefault();
         if (highlightIndex >= 0 && highlightIndex < count) {
-          handleSelect(flatItems[highlightIndex]);
+          handleSelect(results[highlightIndex]);
         }
         break;
       case "Escape":
@@ -230,18 +139,27 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     }
   };
 
-  // Group by provider in defined order
+  // Group by provider
   const grouped = PROVIDER_ORDER
     .map((provider) => ({
       provider,
       label: PROVIDER_LABELS[provider] || provider,
-      models: filtered.filter((m) => m.provider === provider),
+      models: results.filter((m) => m.provider === provider),
     }))
     .filter((g) => g.models.length > 0);
 
-  const getItemIndex = (model: ModelInfo) => flatItems.indexOf(model);
+  // Add any providers not in PROVIDER_ORDER
+  const knownProviders = new Set(PROVIDER_ORDER);
+  const extraProviders = [...new Set(results.map(m => m.provider))].filter(p => !knownProviders.has(p));
+  for (const p of extraProviders) {
+    grouped.push({
+      provider: p,
+      label: PROVIDER_LABELS[p] || p,
+      models: results.filter(m => m.provider === p),
+    });
+  }
 
-  const displayName = models.find((m) => m.id === selectedId)?.name || selectedId || "Select model";
+  const getItemIndex = (model: ModelSearchResult) => results.indexOf(model);
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -252,7 +170,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{displayName}</span>
+        <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         <ChevronDown size={12} />
       </button>
       {open && (
@@ -267,84 +185,57 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
               onKeyDown={handleKeyDown}
               placeholder="Search models..."
               className="appearance-none border-none bg-transparent flex-1 text-xs text-[var(--color-text)] outline-none"
-              role="combobox"
-              aria-expanded={open}
-              aria-controls="model-listbox"
-              aria-activedescendant={highlightIndex >= 0 ? `model-${flatItems[highlightIndex]?.id}` : undefined}
             />
           </div>
-          <div className="flex gap-1 px-3 py-2 border-b border-[var(--color-border)] flex-wrap bg-[var(--color-bg-elevated)]">
-            {CAPABILITIES.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => toggleFilter(key)}
-                className={`text-[10px] px-2.5 py-0.5 rounded-full border transition-all ${
-                  activeFilters.includes(key)
-                    ? "bg-[var(--color-accent)] text-white border-[var(--color-accent)]"
-                    : "border-[var(--color-border)] hover:bg-[var(--color-bg-muted)] text-[var(--color-text-secondary)]"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="overflow-y-auto max-h-[350px] py-1" ref={listRef} role="listbox" id="model-listbox">
+          <div className="overflow-y-auto max-h-[350px] py-1" ref={listRef} role="listbox">
             {grouped.map((group) => (
-
-               <div key={group.provider}>
-                 <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider" role="presentation">
-                   <img src={`/logos/${group.provider}.svg`} alt="" className="w-3.5 h-3.5 flex-shrink-0" />
-                   {group.label}
-                 </div>
-                 {group.models.map((m) => {
-                   const idx = getItemIndex(m);
-                   const highlighted = idx === highlightIndex;
-                   return (
-                      <button
-                        key={m.id}
-
-                       id={`model-${m.id}`}
-                       data-model-item
-                       role="option"
-                       aria-selected={m.id === selectedId}
-                        className={`appearance-none border-none bg-transparent cursor-pointer block w-full box-border px-6 py-1.5 text-xs whitespace-nowrap overflow-hidden text-ellipsis text-left transition-colors${
-                          highlighted ? " bg-[var(--color-bg-muted)] text-[var(--color-text)]" : ""
-                        }${!highlighted ? " hover:bg-[var(--color-bg-muted)] hover:text-[var(--color-text)]" : ""}${
-                          m.id === selectedId ? " text-[var(--color-accent)] font-medium" : highlighted ? "" : " text-[var(--color-text-secondary)]"
-                        }`}
-
-                       onClick={() => handleSelect(m)}
-                       onMouseEnter={() => setHighlightIndex(idx)}
-                       type="button"
-                     >
-                       <div className="flex items-center justify-between w-full">
-                         <span className="overflow-hidden text-ellipsis pr-2">{m.name}</span>
+              <div key={group.provider}>
+                <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+                  {group.label}
+                </div>
+                {group.models.map((m) => {
+                  const idx = getItemIndex(m);
+                  const highlighted = idx === highlightIndex;
+                  const flags: string[] = [];
+                  if (m.reasoning) flags.push("reasoning");
+                  if (m.tool_call) flags.push("tools");
+                  return (
+                    <button
+                      key={m.id}
+                      data-model-item
+                      role="option"
+                      aria-selected={m.id === selectedId}
+                      className={`appearance-none border-none bg-transparent cursor-pointer block w-full box-border px-6 py-1.5 text-xs whitespace-nowrap overflow-hidden text-ellipsis text-left transition-colors${
+                        highlighted ? " bg-[var(--color-bg-muted)] text-[var(--color-text)]" : ""
+                      }${!highlighted ? " hover:bg-[var(--color-bg-muted)] hover:text-[var(--color-text)]" : ""}${
+                        m.id === selectedId ? " text-[var(--color-accent)] font-medium" : highlighted ? "" : " text-[var(--color-text-secondary)]"
+                      }`}
+                      onClick={() => handleSelect(m)}
+                      onMouseEnter={() => setHighlightIndex(idx)}
+                      type="button"
+                    >
+                      <div className="flex items-center justify-between w-full gap-2">
+                        <span className="overflow-hidden text-ellipsis">{m.name}</span>
+                        <span className="flex items-center gap-2 shrink-0">
+                          {flags.length > 0 && (
+                            <span className="text-[9px] text-[var(--color-text-muted)]">{flags.join(", ")}</span>
+                          )}
                           {m.cost && m.cost.input !== undefined && (
-                            <span
-                              className="text-[10px] font-mono text-[var(--color-text-muted)] shrink-0"
-                              title={[
-                                `Input: $${m.cost.input.toFixed(2)}/M`,
-                                `Output: $${(m.cost.output ?? 0).toFixed(2)}/M`,
-                                typeof m.cost.cache_read === "number" ? `Cache read: $${m.cost.cache_read.toFixed(2)}/M` : "",
-                                typeof m.cost.cache_write === "number" ? `Cache write: $${m.cost.cache_write.toFixed(2)}/M` : "",
-                                typeof m.cost.reasoning === "number" ? `Reasoning: $${m.cost.reasoning.toFixed(2)}/M` : "",
-                                typeof m.cost.input_audio === "number" ? `Audio in: $${m.cost.input_audio.toFixed(2)}/M` : "",
-                                typeof m.cost.output_audio === "number" ? `Audio out: $${m.cost.output_audio.toFixed(2)}/M` : "",
-                              ].filter(Boolean).join("\n")}
-                            >
+                            <span className="text-[10px] font-mono text-[var(--color-text-muted)]">
                               ${Math.round(m.cost.input)}/${Math.round(m.cost.output ?? 0)}
                             </span>
                           )}
-
-                       </div>
-                     </button>
-
+                        </span>
+                      </div>
+                    </button>
                   );
                 })}
               </div>
             ))}
-            {filtered.length === 0 && (
-              <div className="p-3 text-xs text-[var(--color-text-muted)] text-center">No models found</div>
+            {results.length === 0 && (
+              <div className="p-3 text-xs text-[var(--color-text-muted)] text-center">
+                {search ? "No models found" : "Type to search models..."}
+              </div>
             )}
           </div>
         </div>

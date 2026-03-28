@@ -89,133 +89,9 @@ function handle_skills_list()
 end
 
 
-const _models_cache = Ref{Union{Vector{Dict{String,String}}, Nothing}}(nothing)
-const _models_cache_time = Ref{Float64}(0.0)
-const _MODELS_CACHE_TTL = 300.0  # 5 minutes
-
-function _get_api_key(env_var::Union{String,Nothing}, config_key::Union{String,Nothing})
-  if config_key !== nothing && haskey(CONFIG, config_key)
-    return string(CONFIG[config_key])
-  end
-  if env_var !== nothing && haskey(ENV, env_var)
-    return ENV[env_var]
-  end
-  nothing
-end
-
-function _fetch_xai_models(api_key::String)
-  models = Dict{String,String}[]
-  try
-    resp = HTTP.get("https://api.x.ai/v1/models";
-      headers=["Authorization" => "Bearer $api_key"],
-      connect_timeout=5, readtimeout=10)
-    parsed = parse_json(String(resp.body))
-    for m in get(parsed, :data, [])
-      id = string(get(m, :id, ""))
-      if !isempty(id)
-        push!(models, Dict("id" => id, "name" => id, "provider" => "xai"))
-      end
-    end
-  catch e
-    @warn "Could not fetch xAI models" exception=e
-  end
-  models
-end
-
-function _fetch_anthropic_models(api_key::String)
-  models = Dict{String,String}[]
-  try
-    resp = HTTP.get("https://api.anthropic.com/v1/models";
-      headers=["x-api-key" => api_key, "anthropic-version" => "2023-06-01"],
-      connect_timeout=5, readtimeout=10)
-    parsed = parse_json(String(resp.body))
-    for m in get(parsed, :data, [])
-      id = string(get(m, :id, ""))
-      display_name = string(get(m, :display_name, id))
-      if !isempty(id)
-        push!(models, Dict("id" => id, "name" => display_name, "provider" => "anthropic"))
-      end
-    end
-  catch e
-    @warn "Could not fetch Anthropic models" exception=e
-  end
-  models
-end
-
-function _fetch_gemini_models(api_key::String)
-  models = Dict{String,String}[]
-  try
-    resp = HTTP.get("https://generativelanguage.googleapis.com/v1beta/models?key=$api_key";
-      connect_timeout=5, readtimeout=10)
-    parsed = parse_json(String(resp.body))
-    for m in get(parsed, :models, [])
-      # API returns "models/gemini-2.5-pro" — strip the prefix
-      full_name = string(get(m, :name, ""))
-      id = replace(full_name, r"^models/" => "")
-      display_name = string(get(m, :displayName, id))
-      # Only include generateContent-capable models
-      methods = get(m, :supportedGenerationMethods, [])
-      if !isempty(id) && any(x -> string(x) == "generateContent", methods)
-        push!(models, Dict("id" => id, "name" => display_name, "provider" => "gemini"))
-      end
-    end
-  catch e
-    @warn "Could not fetch Gemini models" exception=e
-  end
-  models
-end
-
-function handle_models_list()
-  now = time()
-  if _models_cache[] !== nothing && (now - _models_cache_time[]) < _MODELS_CACHE_TTL
-    emit(Dict("type" => "models", "data" => _models_cache[]))
-    return
-  end
-
-  models = Dict{String,String}[]
-
-  # Fetch xAI models
-  xai_key = _get_api_key("XAI_API_KEY", "xai_key")
-  if xai_key !== nothing
-    append!(models, _fetch_xai_models(xai_key))
-  end
-
-  # Fetch Anthropic models
-  anthropic_key = _get_api_key("ANTHROPIC_API_KEY", "anthropic_key")
-  if anthropic_key !== nothing
-    append!(models, _fetch_anthropic_models(anthropic_key))
-  end
-
-  # Fetch Gemini models
-  google_key = _get_api_key("GOOGLE_API_KEY", "google_key")
-  if google_key !== nothing
-    append!(models, _fetch_gemini_models(google_key))
-  end
-
-  # Query Ollama for local models
-  try
-    resp = HTTP.get("http://localhost:11434/api/tags"; connect_timeout=3, readtimeout=5)
-    parsed = parse_json(String(resp.body))
-    for m in get(parsed, :models, [])
-      name = string(get(m, :name, ""))
-      if !isempty(name)
-        push!(models, Dict("id" => name, "name" => name, "provider" => "ollama"))
-      end
-    end
-  catch e
-    @warn "Could not reach Ollama" exception=e
-  end
-
-  # Enrich with pricing from models.dev api.json
-  for m in models
-    prices = get_pricing(m["id"])
-    m["cost_input"] = prices[1]
-    m["cost_output"] = prices[2]
-  end
-
-  _models_cache[] = models
-  _models_cache_time[] = now
-  emit(Dict("type" => "models", "data" => models))
+function handle_model_search(query::String)
+  results = search_models(query; max_results=20)
+  emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
 end
 
 function handle_reset(conv_id::Union{String,Nothing}=nothing)
@@ -968,8 +844,8 @@ while !eof(stdin)
       handle_config_set(string(msg.key), msg.value)
     elseif msg_type == "skills_list"
       handle_skills_list()
-    elseif msg_type == "models_list"
-      @async handle_models_list()
+    elseif msg_type == "model_search"
+      @async handle_model_search(string(get(msg, "query", "")))
     elseif msg_type == "reset"
       handle_reset(conv_id)
     elseif msg_type == "restore_context"

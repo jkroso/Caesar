@@ -13,6 +13,7 @@ export type SidecarEvent =
   | { type: "mcp_servers"; data: Record<string, McpServerInfo> }
   | { type: "skills"; data: SkillInfo[] }
   | { type: "models"; data: ModelInfo[] }
+  | { type: "model_search_results"; data: ModelSearchResult[]; query: string }
   | WithConversationId<{ type: "title"; title: string }>
   | { type: "projects"; data: ProjectInfo[] }
   | { type: "routines"; data: RoutineInfo[] }
@@ -60,6 +61,16 @@ export interface ModelInfo {
     output_audio?: number;
     [key: string]: unknown;
   };
+}
+
+export interface ModelSearchResult {
+  id: string;
+  name: string;
+  provider: string;
+  reasoning: boolean;
+  tool_call: boolean;
+  context: number | null;
+  cost: { input?: number; output?: number } | null;
 }
 
 export type SidecarStatus = "disconnected" | "starting" | "ready" | "error";
