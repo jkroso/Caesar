@@ -494,9 +494,17 @@ function handle_conversations_list()
     "id" => r.id, "agent_id" => r.agent_id, "title" => r.title,
     "handed_off_to" => something(r.handed_off_to, nothing),
     "handed_off_from" => something(r.handed_off_from, nothing),
-    "created_at" => r.created_at, "updated_at" => r.updated_at
+    "created_at" => r.created_at, "updated_at" => r.updated_at,
+    "messages" => let m = something(r.messages, "[]"); try parse_json(m) catch; [] end end
   ) for r in rows]
   emit(Dict("type" => "conversations", "data" => data))
+end
+
+function handle_conversation_save_messages(msg)
+  id = string(get(msg, "id", ""))
+  messages = get(msg, "messages", [])
+  SQLite.execute(DB[], "UPDATE conversations SET messages=?, updated_at=datetime('now') WHERE id=?",
+                 (json(messages), id))
 end
 
 function handle_conversation_create(msg)
@@ -935,6 +943,8 @@ while !eof(stdin)
       handle_conversation_delete(msg)
     elseif msg_type == "conversation_update_title"
       handle_conversation_update_title(msg)
+    elseif msg_type == "conversation_save_messages"
+      handle_conversation_save_messages(msg)
     else
       emit(Dict("type" => "error", "text" => "Unknown message type: $msg_type"))
     end

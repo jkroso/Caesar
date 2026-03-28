@@ -1,3 +1,5 @@
+import type { ChatMessage } from "./message";
+
 type WithConversationId<T> = T & { conversation_id?: string };
 
 export type SidecarEvent =
@@ -126,6 +128,7 @@ export interface ConversationInfo {
   handed_off_from?: string | null;
   created_at: string;
   updated_at: string;
+  messages?: ChatMessage[];
 }
 
 export interface RoutineRunInfo {

@@ -951,8 +951,11 @@ function __init__()
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL DEFAULT 'prosca',
       title TEXT NOT NULL DEFAULT 'New chat', handed_off_to TEXT,
-      handed_off_from TEXT, created_at TEXT, updated_at TEXT
+      handed_off_from TEXT, created_at TEXT, updated_at TEXT,
+      messages TEXT DEFAULT '[]'
     )""")
+  # Add messages column if missing (existing DBs)
+  try SQLite.execute(DB[], "ALTER TABLE conversations ADD COLUMN messages TEXT DEFAULT '[]'") catch end
 
   SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_routines_project ON routines(project_id)")
   SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_id)")

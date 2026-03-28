@@ -26,7 +26,7 @@ function infoToConversation(info: ConversationInfo, existing?: Conversation): Co
     title: info.title,
     createdAt: new Date(info.created_at).getTime(),
     updatedAt: new Date(info.updated_at).getTime(),
-    messages: existing?.messages ?? [],
+    messages: existing?.messages?.length ? existing.messages : info.messages ?? [],
     busy: existing?.busy,
     agentId: info.agent_id,
     handedOffTo: info.handed_off_to ?? undefined,
@@ -97,7 +97,11 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, messages, updatedAt: Date.now() } : c))
     );
-  }, []);
+    // Persist to backend DB
+    if (messages.length > 0) {
+      send({ type: "conversation_save_messages", id, messages });
+    }
+  }, [send]);
 
   const appendMessage = useCallback((id: string, message: ChatMessage) => {
     setConversations((prev) =>
