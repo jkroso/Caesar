@@ -868,7 +868,7 @@ while !eof(stdin)
     elseif msg_type == "config_get"
       handle_config_get()
     elseif msg_type == "config_set"
-      handle_config_set(string(msg.key), msg.value)
+      handle_config_set(string(msg["key"]), msg["value"])
     elseif msg_type == "skills_list"
       handle_skills_list()
     elseif msg_type == "model_search"
