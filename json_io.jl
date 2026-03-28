@@ -95,7 +95,13 @@ end
 
 
 function handle_model_search(query::String)
-  results = search_models(query; max_results=20)
+  allowed = get(CONFIG, "providers", nothing)
+  results = if allowed isa Vector
+    providers = Set(string.(allowed))
+    filter(r -> r["provider"] in providers, search_models(query; max_results=100))[1:min(end, 20)]
+  else
+    search_models(query; max_results=20)
+  end
   emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
 end
 
