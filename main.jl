@@ -427,7 +427,7 @@ function Envelope(text::String;
   Envelope(text, outbox, approvals, auto_allowed, conversation_id, images, audio, documents)
 end
 
-struct Agent
+mutable struct Agent
   id::String
   personality::String
   instructions::String

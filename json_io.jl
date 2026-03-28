@@ -80,6 +80,11 @@ end
 function handle_config_set(key::String, value)
   CONFIG[key] = value
   YAML.write_file(string(HOME * "config.yaml"), CONFIG)
+  if key == "llm"
+    for (_, agent) in AGENTS
+      agent.llm = LLM(string(value), CONFIG)
+    end
+  end
   emit(Dict("type" => "config", "data" => CONFIG))
 end
 

@@ -14,7 +14,7 @@ function fn(args::AbstractString)::String
     eq === nothing && return "Usage: /model key:<config_key>=<value>"
     k, v = strip(kv[1:eq-1]), strip(kv[eq+1:end])
     prosca.CONFIG[k] = v
-    save_config!()
+    prosca.YAML.write_file(string(prosca.HOME * "config.yaml"), prosca.CONFIG)
     return "Saved $k to config."
   end
 
@@ -29,24 +29,21 @@ function fn(args::AbstractString)::String
   # Exact match → switch to it
   exact = findfirst(r -> r["id"] == query, results)
   if exact !== nothing
-    prosca.CONFIG["llm"] = query
-    save_config!()
+    switch_model!(query)
     return "Switched to $query ($(results[exact]["provider"]))"
   end
 
   # Single result → switch to it
   if length(results) == 1
     id = results[1]["id"]
-    prosca.CONFIG["llm"] = id
-    save_config!()
+    switch_model!(id)
     return "Switched to $id ($(results[1]["provider"]))"
   end
 
   # Multiple results → show list
   if isempty(results)
     # Try switching directly (e.g. for ollama models not in models.dev)
-    prosca.CONFIG["llm"] = query
-    save_config!()
+    switch_model!(query)
     return "Switched to $query"
   end
 
@@ -66,8 +63,12 @@ function fn(args::AbstractString)::String
   join(lines, "\n")
 end
 
-function save_config!()
+function switch_model!(model_id::String)
+  prosca.CONFIG["llm"] = model_id
   prosca.YAML.write_file(string(prosca.HOME * "config.yaml"), prosca.CONFIG)
+  for (_, agent) in prosca.AGENTS
+    agent.llm = prosca.LLM(model_id, prosca.CONFIG)
+  end
 end
 
 end
