@@ -22,6 +22,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const keyboardNavRef = useRef(false);
 
   useEffect(() => {
     if (value === undefined && config.llm && typeof config.llm === "string") setSelectedId(config.llm);
@@ -86,9 +87,10 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   }, [send, onChange]);
 
   useEffect(() => {
-    if (highlightIndex < 0 || !listRef.current) return;
+    if (!keyboardNavRef.current || highlightIndex < 0 || !listRef.current) return;
     const items = listRef.current.querySelectorAll("[data-model-item]");
     items[highlightIndex]?.scrollIntoView({ block: "nearest" });
+    keyboardNavRef.current = false;
   }, [highlightIndex]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -97,10 +99,12 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();
+        keyboardNavRef.current = true;
         setHighlightIndex((prev) => (prev + 1) % count);
         break;
       case "ArrowUp":
         e.preventDefault();
+        keyboardNavRef.current = true;
         setHighlightIndex((prev) => (prev <= 0 ? count - 1 : prev - 1));
         break;
       case "Enter":
