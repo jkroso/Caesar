@@ -278,6 +278,13 @@ function route_notification(router::PresenceRouter, text::String;
     end
   end
 end
+"Check if a model result matches the configured provider filter"
+function _matches_provider_filter(r, allowed::Set{String})
+  r["provider"] in allowed && return true
+  id = get(r, "id", "")
+  any(a -> startswith(id, a * "/"), allowed)
+end
+
 "Send messages to the default LLM and return the full response text"
 function llm_generate(messages::Vector; model::Union{String,Nothing}=nothing)::String
   llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)

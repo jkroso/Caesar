@@ -121,7 +121,9 @@ function gather_completions(prefix::String)::Vector{String}
       allowed = get(CONFIG, "providers", nothing)
       providers = allowed isa Vector ? Set(string.(allowed)) : nothing
       for m in search_models(partial; max_results=20)
-        (providers === nothing || m["provider"] in providers) || continue
+        if providers !== nothing
+          _matches_provider_filter(m, providers) || continue
+        end
         push!(results, "/model " * m["id"])
         length(results) >= 10 && break
       end
