@@ -34,6 +34,13 @@ export default function InputArea({ centered }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashRef = useRef<HTMLDivElement>(null);
 
+  // Focus textarea when window regains focus
+  useEffect(() => {
+    const onFocus = () => textareaRef.current?.focus();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   // Fetch slash completions on mount
   useEffect(() => {
     const unsub = onEvent((event) => {
