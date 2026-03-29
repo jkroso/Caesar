@@ -1,4 +1,4 @@
-import { useEffect, useRef, Fragment } from "react";
+import { useEffect, useRef } from "react";
 import { useChat } from "@/contexts/ChatContext";
 import MessageItem from "./MessageItem";
 import WorkingIndicator from "./WorkingIndicator";

@@ -26,7 +26,7 @@ export default function InputArea({ centered }: Props) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [slashItems, setSlashItems] = useState<SlashItem[]>([]);
-  const [showSlash, setShowSlash] = useState(false);
+  const [slashState, setSlashState] = useState<{ query: string; start: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const { sendMessage } = useChat();
   const { status, send, onEvent } = useSidecar();
@@ -43,11 +43,11 @@ export default function InputArea({ centered }: Props) {
     return unsub;
   }, [send, onEvent]);
 
-  // Filter items based on current input
-  const slashQuery = showSlash ? text.slice(1).toLowerCase() : "";
-  const filtered = slashItems.filter(
-    (item) => item.name.toLowerCase().includes(slashQuery) || item.description.toLowerCase().includes(slashQuery)
-  );
+  // Filter items based on current slash token
+  const showSlash = slashState !== null;
+  const filtered = slashState
+    ? slashItems.filter((item) => item.name.toLowerCase().includes(slashState.query) || item.description.toLowerCase().includes(slashState.query))
+    : [];
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
@@ -55,17 +55,23 @@ export default function InputArea({ centered }: Props) {
     sendMessage(trimmed, attachments.length > 0 ? attachments : undefined);
     setText("");
     setAttachments([]);
-    setShowSlash(false);
+    setSlashState(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
   }, [text, attachments, sendMessage]);
 
   const selectSlashItem = useCallback((item: SlashItem) => {
-    setText("/" + item.name + " ");
-    setShowSlash(false);
+    if (slashState) {
+      const before = text.slice(0, slashState.start);
+      const after = text.slice(slashState.start + slashState.query.length + 1); // +1 for the /
+      setText(before + "/" + item.name + " " + after);
+    } else {
+      setText("/" + item.name + " ");
+    }
+    setSlashState(null);
     textareaRef.current?.focus();
-  }, []);
+  }, [text, slashState]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlash && filtered.length > 0) {
@@ -86,7 +92,7 @@ export default function InputArea({ centered }: Props) {
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        setShowSlash(false);
+        setSlashState(null);
         return;
       }
     }
@@ -103,12 +109,20 @@ export default function InputArea({ centered }: Props) {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
 
-    // Show slash menu when typing /word at the start (no spaces yet)
-    if (val.startsWith("/") && !val.includes(" ")) {
-      setShowSlash(true);
+    // Detect /token at cursor position
+    const cursor = e.target.selectionStart ?? val.length;
+    // Walk backwards from cursor to find a / that starts a token
+    let slashPos = -1;
+    for (let i = cursor - 1; i >= 0; i--) {
+      if (val[i] === " " || val[i] === "\n") break;
+      if (val[i] === "/") { slashPos = i; break; }
+    }
+    if (slashPos >= 0 && (slashPos === 0 || val[slashPos - 1] === " " || val[slashPos - 1] === "\n")) {
+      const token = val.slice(slashPos + 1, cursor).toLowerCase();
+      setSlashState({ query: token, start: slashPos });
       setSlashIndex(0);
     } else {
-      setShowSlash(false);
+      setSlashState(null);
     }
   };
 
