@@ -17,6 +17,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [highlightIndex, setHighlightIndex] = useState(-1);
   const [filters, setFilters] = useState<Set<string>>(new Set());
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -43,6 +44,8 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   useEffect(() => {
     send({ type: "providers_list" });
+    // Fetch initial results so we can resolve provider logo for the current model
+    send({ type: "model_search", query: "" });
   }, [send]);
 
   // Send search when query changes (debounced)
@@ -77,6 +80,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   const handleSelect = useCallback((model: ModelSearchResult) => {
     setSelectedId(model.id);
+    setSelectedProvider(model.provider);
     if (onChange) {
       onChange(model.id);
     } else {
@@ -184,9 +188,9 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   const getItemIndex = (model: ModelSearchResult) => filteredResults.indexOf(model);
 
-  // Find logo for the selected model's provider by matching in results
-  const selectedModel = results.find((m) => m.id === selectedId);
-  const selectedLogo = selectedModel ? providerMap.get(selectedModel.provider)?.logo ?? null : null;
+  // Find logo for the selected model's provider
+  const resolvedProvider = selectedProvider || results.find((m) => m.id === selectedId)?.provider;
+  const selectedLogo = resolvedProvider ? providerMap.get(resolvedProvider)?.logo ?? null : null;
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -201,7 +205,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         {open ? (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         ) : selectedLogo ? (
-          <img src={selectedLogo} alt={selectedModel?.provider || ""} className="w-4 h-4" />
+          <img src={selectedLogo} alt={resolvedProvider || ""} className="w-4 h-4" />
         ) : (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         )}
