@@ -906,7 +906,7 @@ function __init__()
   Logging.global_logger(Logging.ConsoleLogger(stderr, get(LOG_LEVELS, get(CONFIG, "log_level", "warn"), Logging.Warn)))
 
   # Initialize DB
-  db_path = HOME * "memories/memories.db"
+  db_path = HOME * "memory/main.db"
   db_path.exists || mkpath(db_path.parent)
   DB[] = SQLite.DB(string(db_path))
 
