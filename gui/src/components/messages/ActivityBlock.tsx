@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { ChevronRight, Wrench } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import type { ActivityStep } from "@/types/message";
 
 interface Props {
@@ -13,6 +15,31 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
   return String(n);
+}
+
+function ToolCallStep({ name, detail }: { name: string; detail: string }) {
+  // For eval/js calls, extract the code and show as a syntax-highlighted block
+  if (name === "eval" || name === "js") {
+    try {
+      const parsed = JSON.parse(detail);
+      const code = parsed.code ?? parsed.expression ?? detail;
+      const lang = name === "js" ? "javascript" : "julia";
+      return (
+        <div className="activity-code">
+          <span className="font-mono text-[var(--color-accent)]">{name}</span>
+          <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+            {"```" + lang + "\n" + code + "\n```"}
+          </ReactMarkdown>
+        </div>
+      );
+    } catch { /* fall through */ }
+  }
+  return (
+    <div>
+      <span className="font-mono text-[var(--color-accent)]">{name}()</span>
+      <pre className="mt-0.5 text-[var(--color-text-muted)] text-[10px] overflow-x-auto max-w-[500px] whitespace-pre-wrap break-all m-0">{detail.slice(0, 200)}</pre>
+    </div>
+  );
 }
 
 export default function ActivityBlock({ steps, collapsed, inputTokens, outputTokens }: Props) {
@@ -54,10 +81,7 @@ export default function ActivityBlock({ steps, collapsed, inputTokens, outputTok
           {steps.map((step, i) => (
             <div key={i} className="text-[11px]">
               {step.type === "tool_call" ? (
-                <div>
-                  <span className="font-mono text-[var(--color-accent)]">{step.name}()</span>
-                  <pre className="mt-0.5 text-[var(--color-text-muted)] text-[10px] overflow-x-auto max-w-[500px] whitespace-pre-wrap break-all m-0">{step.detail.slice(0, 200)}</pre>
-                </div>
+                <ToolCallStep name={step.name} detail={step.detail} />
               ) : (
                 <div>
                   <span className="text-[var(--color-text-muted)]">{"\u2192"} </span>
