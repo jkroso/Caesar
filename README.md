@@ -1,10 +1,8 @@
 # Caesar: An Agent Platform with a Julia REPL
 
-Caesar is an AI agent platform built in Julia that uses a persistent Julia REPL as its primary tool. Instead of shelling out to Bash, agents evaluate Julia expressions step-by-step, keeping variables in scope across interactions.
+Caesar is an AI agent platform built in Julia that uses a Julia REPL as its primary tool. Instead of shelling out to Bash, agents evaluate Julia expressions step-by-step, keeping variables in scope across interactions.
 
-<img src="./tui_screenshot.png" alt="tui screenshot" style=""/>
-
-The REPL is shared — you can work in it alongside your agents. Define a function, then ask an agent to write tests for it by name. No copy-pasting needed since agents can introspect the same module scope you're working in.
+<img src="./GUI Screenshot.png" alt="GUI screenshot" style=""/>
 
 Using Julia instead of Bash for tool calls means smaller contexts, fewer tokens, and code that's easier to validate statically. The interpreter runs every expression through a safety system that checks filesystem paths, blocks `eval`/`ENV` mutation, and prompts for approval on unknown operations.
 
