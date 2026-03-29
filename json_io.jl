@@ -16,6 +16,7 @@
 @use SQLite
 @use YAML
 @use UUIDs
+@use Base64
 
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
