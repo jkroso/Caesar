@@ -17,7 +17,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
-  const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [highlightIndex, setHighlightIndex] = useState(-1);
   const [filters, setFilters] = useState<Set<string>>(new Set());
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -80,7 +79,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   const handleSelect = useCallback((model: ModelSearchResult) => {
     setSelectedId(model.id);
-    setSelectedProvider(model.provider);
     if (onChange) {
       onChange(model.id);
     } else {
@@ -189,7 +187,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const getItemIndex = (model: ModelSearchResult) => filteredResults.indexOf(model);
 
   // Find logo for the selected model's provider
-  const resolvedProvider = selectedProvider || results.find((m) => m.id === selectedId)?.provider;
+  const resolvedProvider = results.find((m) => m.id === selectedId)?.provider;
   const selectedLogo = resolvedProvider ? providerMap.get(resolvedProvider)?.logo ?? null : null;
 
   return (
