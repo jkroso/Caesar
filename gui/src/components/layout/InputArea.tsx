@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from "react";
-import { ArrowUp, Paperclip, X } from "lucide-react";
+import { Paperclip, X } from "lucide-react";
 import { useChat } from "@/contexts/ChatContext";
 import { useSidecar } from "@/contexts/SidecarContext";
 import ModelSelector from "./ModelSelector";
@@ -175,7 +175,6 @@ export default function InputArea({ centered }: Props) {
   }, [slashIndex, showSlash]);
 
   const disabled = status !== "ready";
-  const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled;
 
   return (
     <div className={`p-3 px-4${centered ? " w-full max-w-[700px] mx-auto" : ""}`}>
@@ -267,18 +266,6 @@ export default function InputArea({ centered }: Props) {
             />
             <div className="flex items-center gap-2 shrink-0">
               <ModelSelector />
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`appearance-none border-none w-7 h-7 rounded-lg flex items-center justify-center cursor-pointer ${
-                  canSend
-                    ? "bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)]"
-                    : "bg-[var(--color-bg-muted)] text-[var(--color-text-muted)] cursor-default"
-                }`}
-                style={{ transition: "background-color 150ms ease, transform 100ms ease" }}
-              >
-                <ArrowUp size={14} strokeWidth={2.5} />
-              </button>
             </div>
           </div>
         </div>
