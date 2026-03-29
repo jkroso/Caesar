@@ -42,6 +42,7 @@ end
 
 struct ToolResult
   name::String
+  args::String
   result::String
 end
 
@@ -833,7 +834,7 @@ function _process_message(user_input::String, agent::Agent;
         "Unknown tool '$(tc.name)'"
       end
 
-      put!(outbox, ToolResult(tc.name, result))
+      put!(outbox, ToolResult(tc.name, json(tc.arguments), result))
       log_memory("$(tc.name): $(first(result, 500))"; agent_id=agent.id, conversation_id)
       truncated = length(result) > 4000 ? first(result, 4000) * "\n... (truncated)" : result
       push!(messages, ToolResultMessage(tc.id, truncated))

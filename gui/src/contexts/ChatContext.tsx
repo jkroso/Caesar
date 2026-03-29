@@ -205,11 +205,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
         case "tool_call_request": {
           console.log("%c[Agent] Tool Call → %s", "color: #f59e0b; font-weight: bold", event.name, event.args);
-          // Still show approval card for tool requests that need confirmation
           const toolReqMsg = { role: "tool_request" as const, id: event.id, name: event.name, args: event.args, timestamp: now };
           if (isForActive) {
             dispatch({ type: "insert_before_queued", message: toolReqMsg });
-            dispatch({ type: "append_activity_step", step: { type: "tool_call", name: event.name, detail: event.args, timestamp: now } });
           } else {
             appendMessage(eventConvId!, toolReqMsg);
           }
@@ -218,6 +216,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         case "tool_result": {
           console.log("%c[Agent] Tool Result ← %s", "color: #10b981; font-weight: bold", event.name, event.result);
           if (isForActive) {
+            if (event.args) {
+              dispatch({ type: "append_activity_step", step: { type: "tool_call", name: event.name, detail: event.args, timestamp: now } });
+            }
             dispatch({ type: "append_activity_step", step: { type: "tool_result", name: event.name, detail: event.result, timestamp: now } });
           }
           break;

@@ -64,7 +64,7 @@ function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=n
         emit(Dict("type" => "tool_call_request", "id" => string(event.id), "name" => event.name, "args" => event.args); conversation_id)
       end
     elseif event isa ToolResult
-      emit(Dict("type" => "tool_result", "name" => event.name, "result" => event.result); conversation_id)
+      emit(Dict("type" => "tool_result", "name" => event.name, "args" => event.args, "result" => event.result); conversation_id)
     elseif event isa AgentDone
       d = Dict{String,Any}("type" => "agent_done")
       (event.input_tokens > 0 || event.output_tokens > 0) && (d["input_tokens"] = event.input_tokens; d["output_tokens"] = event.output_tokens)
