@@ -156,6 +156,10 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   const getItemIndex = (model: ModelSearchResult) => results.indexOf(model);
 
+  // Find logo for the selected model's provider
+  const selectedProvider = selectedId ? selectedId.split(":")[0] || selectedId.split("/")[0] : null;
+  const selectedLogo = selectedProvider ? providerMap.get(selectedProvider)?.logo ?? null : null;
+
   return (
     <div className="relative" ref={dropdownRef}>
       <button
@@ -164,8 +168,15 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
+        title={selectedId || "Select model"}
       >
-        <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
+        {open ? (
+          <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
+        ) : selectedLogo ? (
+          <img src={selectedLogo} alt={selectedProvider || ""} className="w-4 h-4" />
+        ) : (
+          <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
+        )}
         <ChevronDown size={12} />
       </button>
       {open && (
