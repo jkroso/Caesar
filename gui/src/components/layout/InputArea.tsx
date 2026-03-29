@@ -51,9 +51,13 @@ export default function InputArea({ centered }: Props) {
   }, [send, onEvent]);
 
   // Filter items based on current slash token
+  // Mid-message slash only shows skills (commands only work at start of input)
   const showSlash = slashState !== null;
+  const midMessage = slashState !== null && slashState.start > 0;
   const filtered = slashState
-    ? slashItems.filter((item) => item.name.toLowerCase().includes(slashState.query) || item.description.toLowerCase().includes(slashState.query))
+    ? slashItems.filter((item) =>
+        (!midMessage || item.kind === "skill") &&
+        (item.name.toLowerCase().includes(slashState.query) || item.description.toLowerCase().includes(slashState.query)))
     : [];
 
   const handleSend = useCallback(() => {
