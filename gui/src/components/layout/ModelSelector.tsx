@@ -202,14 +202,12 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         aria-expanded={open}
         title={selectedId || "Select model"}
       >
-        {open ? (
-          <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
-        ) : selectedLogo ? (
+        {!open && selectedLogo ? (
           <img src={selectedLogo} alt={resolvedProvider || ""} className="w-4 h-4" />
         ) : (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         )}
-        <ChevronDown size={12} />
+        {!selectedLogo && !open && <ChevronDown size={12} />}
       </button>
       {open && (
         <div className={`absolute ${dropdownPosition === "above" ? "bottom-[calc(100%+4px)]" : "top-[calc(100%+4px)]"} right-0 w-80 max-h-[400px] bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-xl shadow-lg z-[100] flex flex-col overflow-hidden`}>
