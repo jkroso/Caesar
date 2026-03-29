@@ -76,6 +76,7 @@ export interface ModelSearchResult {
   tool_call: boolean;
   context: number | null;
   cost: { input?: number; output?: number } | null;
+  modalities?: { input?: string[]; output?: string[] };
 }
 
 export interface ProviderInfo {
