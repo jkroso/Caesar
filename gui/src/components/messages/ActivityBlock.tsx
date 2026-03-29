@@ -1,12 +1,11 @@
 import { useState, useEffect } from "react";
 import { ChevronRight, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import julia from "highlight.js/lib/languages/julia";
-import javascript from "highlight.js/lib/languages/javascript";
+import rehypeShikiFromHighlighter from "@shikijs/rehype/core";
+import { highlighter, defaultTheme } from "@/shiki";
 import type { ActivityStep } from "@/types/message";
 
-const rehypeHighlightOptions = { languages: { julia, javascript } };
+const rehypeShikiOptions: any = [rehypeShikiFromHighlighter, highlighter, { theme: defaultTheme }];
 
 interface Props {
   steps: ActivityStep[];
@@ -31,7 +30,7 @@ function ToolCallStep({ name, detail }: { name: string; detail: string }) {
       return (
         <div className="activity-code">
           <span className="font-mono text-[var(--color-accent)]">{name}</span>
-          <ReactMarkdown rehypePlugins={[[rehypeHighlight, rehypeHighlightOptions]]}>
+          <ReactMarkdown rehypePlugins={[rehypeShikiOptions]}>
             {"```" + lang + "\n" + code + "\n```"}
           </ReactMarkdown>
         </div>
