@@ -1,9 +1,10 @@
-import { useState, useRef, useCallback, type KeyboardEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from "react";
 import { ArrowUp, Paperclip, X } from "lucide-react";
 import { useChat } from "@/contexts/ChatContext";
 import { useSidecar } from "@/contexts/SidecarContext";
 import ModelSelector from "./ModelSelector";
 import type { Attachment } from "@/types/message";
+import type { SlashItem } from "@/types/sidecar";
 
 interface Props {
   centered?: boolean;
@@ -24,10 +25,29 @@ function fileToAttachment(file: File): Promise<Attachment> {
 export default function InputArea({ centered }: Props) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [slashItems, setSlashItems] = useState<SlashItem[]>([]);
+  const [showSlash, setShowSlash] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const { sendMessage } = useChat();
-  const { status } = useSidecar();
+  const { status, send, onEvent } = useSidecar();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const slashRef = useRef<HTMLDivElement>(null);
+
+  // Fetch slash completions on mount
+  useEffect(() => {
+    const unsub = onEvent((event) => {
+      if (event.type === "slash_completions") setSlashItems(event.data);
+    });
+    send({ type: "slash_completions" });
+    return unsub;
+  }, [send, onEvent]);
+
+  // Filter items based on current input
+  const slashQuery = showSlash ? text.slice(1).toLowerCase() : "";
+  const filtered = slashItems.filter(
+    (item) => item.name.toLowerCase().includes(slashQuery) || item.description.toLowerCase().includes(slashQuery)
+  );
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
@@ -35,12 +55,41 @@ export default function InputArea({ centered }: Props) {
     sendMessage(trimmed, attachments.length > 0 ? attachments : undefined);
     setText("");
     setAttachments([]);
+    setShowSlash(false);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
   }, [text, attachments, sendMessage]);
 
+  const selectSlashItem = useCallback((item: SlashItem) => {
+    setText("/" + item.name + " ");
+    setShowSlash(false);
+    textareaRef.current?.focus();
+  }, []);
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSlash && filtered.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => Math.min(i + 1, filtered.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        selectSlashItem(filtered[slashIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowSlash(false);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -48,10 +97,19 @@ export default function InputArea({ centered }: Props) {
   };
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value);
+    const val = e.target.value;
+    setText(val);
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
+
+    // Show slash menu when typing /word at the start (no spaces yet)
+    if (val.startsWith("/") && !val.includes(" ")) {
+      setShowSlash(true);
+      setSlashIndex(0);
+    } else {
+      setShowSlash(false);
+    }
   };
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -83,12 +141,46 @@ export default function InputArea({ centered }: Props) {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   }, []);
 
+  // Scroll selected item into view
+  useEffect(() => {
+    if (showSlash && slashRef.current) {
+      const el = slashRef.current.children[slashIndex] as HTMLElement | undefined;
+      el?.scrollIntoView({ block: "nearest" });
+    }
+  }, [slashIndex, showSlash]);
+
   const disabled = status !== "ready";
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled;
 
   return (
     <div className={`p-3 px-4${centered ? " w-full max-w-[700px] mx-auto" : ""}`}>
-      <div className="max-w-[800px] mx-auto">
+      <div className="max-w-[800px] mx-auto relative">
+        {/* Slash autocomplete popup */}
+        {showSlash && filtered.length > 0 && (
+          <div
+            ref={slashRef}
+            className="absolute bottom-full mb-1 left-0 right-0 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-xl shadow-lg max-h-[240px] overflow-y-auto z-20 py-1"
+          >
+            {filtered.map((item, i) => (
+              <button
+                key={item.name}
+                className={`w-full text-left px-3 py-2 flex items-center gap-3 cursor-pointer border-none bg-transparent ${
+                  i === slashIndex ? "bg-[var(--color-bg-muted)]" : "hover:bg-[var(--color-bg-muted)]"
+                }`}
+                onMouseDown={(e) => { e.preventDefault(); selectSlashItem(item); }}
+                onMouseEnter={() => setSlashIndex(i)}
+              >
+                <span className="text-[12px] font-mono text-[var(--color-accent)] shrink-0">/{item.name}</span>
+                <span className="text-[11px] text-[var(--color-text-muted)] truncate">{item.description}</span>
+                <span className={`text-[9px] px-1.5 py-px rounded-full ml-auto shrink-0 ${
+                  item.kind === "command"
+                    ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                    : "bg-[var(--color-bg-muted)] text-[var(--color-text-muted)]"
+                }`}>{item.kind}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div
           className="border border-[var(--color-border)] rounded-2xl bg-[var(--color-bg-elevated)] focus-within:border-[var(--color-accent)] py-3 px-4"
           style={{ transition: "border-color 200ms ease, box-shadow 200ms ease" }}
@@ -145,7 +237,7 @@ export default function InputArea({ centered }: Props) {
               value={text}
               onChange={handleInput}
               onKeyDown={handleKeyDown}
-              placeholder={disabled ? "Connecting to Prosca..." : "What's on your mind?"}
+              placeholder={disabled ? "Connecting to Prosca..." : "What's on your mind? Type / for commands"}
               disabled={disabled}
               rows={1}
             />

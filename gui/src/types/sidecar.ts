@@ -9,8 +9,10 @@ export type SidecarEvent =
   | WithConversationId<{ type: "agent_done" }>
   | WithConversationId<{ type: "error"; text: string }>
   | { type: "ready" }
-  | { type: "command_result"; name: string; result: string }
+  | WithConversationId<{ type: "command_result"; name: string; result: string }>
   | { type: "config"; data: Record<string, unknown> }
+  | { type: "slash_completions"; data: SlashItem[] }
+  | { type: "commands"; data: SlashItem[] }
   | { type: "personality"; file: string; content: string }
   | { type: "mcp_servers"; data: Record<string, McpServerInfo> }
   | { type: "skills"; data: SkillInfo[] }
@@ -129,6 +131,12 @@ export interface ConversationInfo {
   created_at: string;
   updated_at: string;
   messages?: ChatMessage[];
+}
+
+export interface SlashItem {
+  name: string;
+  description: string;
+  kind: "command" | "skill";
 }
 
 export interface RoutineRunInfo {

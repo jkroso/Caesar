@@ -200,6 +200,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           }
           break;
         }
+        case "command_result": {
+          if (isForActive) {
+            dispatch({ type: "add_message", message: { role: "agent", text: event.result, timestamp: now } });
+            dispatch({ type: "decrement_pending" });
+          }
+          if (eventConvId) setBusy(eventConvId, false);
+          break;
+        }
         case "agent_done": {
           console.log("%c[Agent] Done", "color: #6b7280; font-weight: bold");
           if (isForActive) {

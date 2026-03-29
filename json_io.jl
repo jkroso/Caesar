@@ -93,6 +93,20 @@ function handle_skills_list()
   emit(Dict("type" => "skills", "data" => skills))
 end
 
+function handle_commands_list()
+  cmds = [Dict("name" => c.name, "description" => c.description) for c in values(COMMANDS)]
+  emit(Dict("type" => "commands", "data" => cmds))
+end
+
+function handle_slash_completions()
+  items = vcat(
+    [Dict("name" => c.name, "description" => c.description, "kind" => "command") for c in values(COMMANDS)],
+    [Dict("name" => s.name, "description" => s.description, "kind" => "skill") for s in values(SKILLS)]
+  )
+  sort!(items; by=i->i["name"])
+  emit(Dict("type" => "slash_completions", "data" => items))
+end
+
 
 function handle_model_search(query::String)
   allowed = get(CONFIG, "providers", nothing)
@@ -837,6 +851,18 @@ while !eof(stdin)
       text = string(get(msg, "text", ""))
       agent_id = string(get(msg, "agent_id", "prosca"))
       last_user_activity_at[] = now(Dates.UTC)
+      # Intercept /commands (skills go through to the agent which handles them in process_message)
+      if startswith(text, "/") && !startswith(text, "//")
+        parts = split(text, limit=2)
+        cmd_name = parts[1][2:end]
+        if haskey(COMMANDS, cmd_name)
+          cmd_args = length(parts) > 1 ? strip(String(parts[2])) : ""
+          result = try COMMANDS[cmd_name].fn(cmd_args) catch e "Command error: $(sprint(showerror, e))" end
+          emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)); conversation_id=conv_id)
+          continue
+        end
+        # Not a command — fall through to agent (may be a skill like /browser)
+      end
       agent = get(AGENTS, agent_id, default_agent())
       conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
       # Parse file attachments
@@ -882,6 +908,10 @@ while !eof(stdin)
       handle_config_set(string(msg["key"]), msg["value"])
     elseif msg_type == "skills_list"
       handle_skills_list()
+    elseif msg_type == "commands_list"
+      handle_commands_list()
+    elseif msg_type == "slash_completions"
+      handle_slash_completions()
     elseif msg_type == "model_search"
       @async handle_model_search(string(get(msg, "query", "")))
     elseif msg_type == "providers_list"
