@@ -203,7 +203,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         title={selectedId || "Select model"}
       >
         {!open && selectedLogo ? (
-          <img src={selectedLogo} alt={resolvedProvider || ""} className="w-4 h-4" />
+          <img src={selectedLogo} alt={resolvedProvider || ""} className="w-5 h-5 rounded-md bg-white/90 p-0.5" />
         ) : (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         )}
