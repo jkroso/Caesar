@@ -10,9 +10,6 @@ function fn(args::AbstractString)::String
   entry === nothing && return "No memory provider for agent '$agent_id'"
   provider, conn = entry
 
-  # Clear the memories table in main DB
-  try prosca.SQLite.execute(prosca.DB[], "DELETE FROM memories WHERE agent_id = ?", (agent_id,)) catch end
-
   if provider == :hindsight
     hs = prosca.eval(:(@use("./memory/hindsight/hindsight")))
     try

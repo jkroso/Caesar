@@ -912,17 +912,6 @@ function __init__()
 
   # Create tables
   SQLite.execute(DB[], """
-    CREATE TABLE IF NOT EXISTS memories (
-      id INTEGER PRIMARY KEY, timestamp TEXT, role TEXT, content TEXT,
-      embedding TEXT, metadata TEXT DEFAULT '{}', conversation_id TEXT DEFAULT NULL
-    )""")
-  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_timestamp ON memories(timestamp)")
-  try SQLite.execute(DB[], "ALTER TABLE memories ADD COLUMN conversation_id TEXT DEFAULT NULL") catch end
-  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_conversation_id ON memories(conversation_id)")
-  try SQLite.execute(DB[], "ALTER TABLE memories ADD COLUMN agent_id TEXT DEFAULT 'prosca'") catch end
-  SQLite.execute(DB[], "CREATE INDEX IF NOT EXISTS idx_agent_id ON memories(agent_id)")
-
-  SQLite.execute(DB[], """
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
       is_default INTEGER DEFAULT 0, paused INTEGER DEFAULT 0, model TEXT,
