@@ -131,7 +131,7 @@ function handle_providers_list()
   end
   # Find logos directory in LLM.jl package
   llm_logos_dir = let m = methods(search_providers).ms
-    isempty(m) ? nothing : joinpath(dirname(dirname(string(m[1].file))), "logos")
+    isempty(m) ? nothing : joinpath(dirname(string(m[1].file)), "logos")
   end
   # Strip models from provider data (too large), just send metadata
   data = [Dict{String,Any}(
