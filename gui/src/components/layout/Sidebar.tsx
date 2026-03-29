@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Plus, MessageSquare, Zap, Clock, Settings, MoreVertical, FolderOpen, Bot } from "lucide-react";
+import { Plus, MessageSquare, Zap, Clock, Settings, Trash2, FolderOpen, Bot } from "lucide-react";
 import { useConversations } from "@/contexts/ConversationContext";
 import { useAgents } from "@/contexts/AgentContext";
 import { useSidecar } from "@/contexts/SidecarContext";
@@ -26,7 +25,7 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
   const { agents } = useAgents();
   const { status } = useSidecar();
   const { unseenCount } = useProjects();
-  const [menuOpen, setMenuOpen] = useState<string | null>(null);
+
 
   const handleSelectConversation = (id: string) => {
     setActiveId(id);
@@ -199,21 +198,12 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
                 >
                   <span className="overflow-hidden text-ellipsis whitespace-nowrap flex-1">{conv.title}</span>
                   <button
-                    className="appearance-none border-none bg-transparent cursor-pointer hidden text-[var(--color-text-muted)] p-0.5 group-hover:flex hover:text-[var(--color-text)]"
-                    onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === conv.id ? null : conv.id); }}
+                    className="appearance-none border-none bg-transparent cursor-pointer hidden text-[var(--color-text-muted)] p-0.5 group-hover:flex hover:text-[var(--color-error)]"
+                    onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id); }}
+                    title="Delete conversation"
                   >
-                    <MoreVertical size={13} />
+                    <Trash2 size={12} />
                   </button>
-                  {menuOpen === conv.id && (
-                    <div className="absolute right-0 top-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-lg shadow-lg z-10 min-w-[120px] py-1">
-                      <button
-                        className="appearance-none border-none bg-transparent cursor-pointer w-full text-left px-3 py-1.5 text-[12px] text-[var(--color-error)] hover:bg-[var(--color-bg-muted)]"
-                        onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id); setMenuOpen(null); }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  )}
                 </div>
               ))}
 
