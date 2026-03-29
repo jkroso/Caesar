@@ -71,12 +71,12 @@ export default function InputArea({ centered }: Props) {
     if (showSlash && filtered.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSlashIndex((i) => Math.min(i + 1, filtered.length - 1));
+        setSlashIndex((i) => (i + 1) % filtered.length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSlashIndex((i) => Math.max(i - 1, 0));
+        setSlashIndex((i) => (i - 1 + filtered.length) % filtered.length);
         return;
       }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
