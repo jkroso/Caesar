@@ -184,9 +184,9 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   const getItemIndex = (model: ModelSearchResult) => filteredResults.indexOf(model);
 
-  // Find logo for the selected model's provider
-  const selectedProvider = selectedId ? selectedId.split(":")[0] || selectedId.split("/")[0] : null;
-  const selectedLogo = selectedProvider ? providerMap.get(selectedProvider)?.logo ?? null : null;
+  // Find logo for the selected model's provider by matching in results
+  const selectedModel = results.find((m) => m.id === selectedId);
+  const selectedLogo = selectedModel ? providerMap.get(selectedModel.provider)?.logo ?? null : null;
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -201,7 +201,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         {open ? (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         ) : selectedLogo ? (
-          <img src={selectedLogo} alt={selectedProvider || ""} className="w-4 h-4" />
+          <img src={selectedLogo} alt={selectedModel?.provider || ""} className="w-4 h-4" />
         ) : (
           <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{selectedId || "Select model"}</span>
         )}
