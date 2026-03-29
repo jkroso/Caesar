@@ -121,28 +121,32 @@ function handle_model_search(query::String)
 end
 
 function handle_providers_list()
-  allowed = get(CONFIG, "providers", nothing)
-  result = if allowed isa Vector
-    ids = string.(allowed)
-    all_providers = try providers(ids) catch; search_providers(ids) end
-    filter(p -> get(p, "id", "") in ids, all_providers)
-  else
-    search_providers()
-  end
-  # Find logos directory in LLM.jl package
-  llm_logos_dir = let m = methods(search_providers).ms
-    isempty(m) ? nothing : joinpath(dirname(string(m[1].file)), "logos")
-  end
-  # Strip models from provider data (too large), just send metadata
-  data = [Dict{String,Any}(
-    "id" => get(p, "id", ""),
-    "name" => get(p, "name", ""),
-    "logo" => let id = get(p, "id", "")
-      logo_path = llm_logos_dir !== nothing ? joinpath(llm_logos_dir, "$id.svg") : ""
-      isfile(logo_path) ? "data:image/svg+xml;base64," * base64encode(read(logo_path)) : nothing
+  try
+    allowed = get(CONFIG, "providers", nothing)
+    result = if allowed isa Vector
+      ids = string.(allowed)
+      all_providers = try providers(ids) catch; search_providers(ids) end
+      filter(p -> get(p, "id", "") in ids, all_providers)
+    else
+      search_providers()
     end
-  ) for p in result]
-  emit(Dict("type" => "providers", "data" => data))
+    # Find logos directory in LLM.jl package
+    logos_dir = joinpath(dirname(string(methods(search_providers).ms[1].file)), "logos")
+    data = map(result) do p
+      id = get(p, "id", "")
+      logo_path = joinpath(logos_dir, "$id.svg")
+      logo = try
+        isfile(logo_path) ? "data:image/svg+xml;base64," * base64encode(read(logo_path)) : nothing
+      catch
+        nothing
+      end
+      Dict{String,Any}("id" => id, "name" => get(p, "name", ""), "logo" => logo)
+    end
+    emit(Dict("type" => "providers", "data" => data))
+  catch e
+    @warn "handle_providers_list failed" exception=e
+    emit(Dict("type" => "providers", "data" => []))
+  end
 end
 
 function handle_reset(conv_id::Union{String,Nothing}=nothing)
