@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ChevronRight, Wrench } from "lucide-react";
 import type { ActivityStep } from "@/types/message";
 
@@ -9,6 +9,10 @@ interface Props {
 
 export default function ActivityBlock({ steps, collapsed }: Props) {
   const [expanded, setExpanded] = useState(!collapsed);
+
+  useEffect(() => {
+    if (collapsed) setExpanded(false);
+  }, [collapsed]);
 
   const toolCalls = steps.filter((s) => s.type === "tool_call");
   const uniqueTools = [...new Set(toolCalls.map((s) => s.name))];
