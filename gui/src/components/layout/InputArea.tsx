@@ -164,9 +164,8 @@ export default function InputArea({ centered }: Props) {
             {filtered.map((item, i) => (
               <button
                 key={item.name}
-                className={`w-full text-left px-3 py-2 flex items-center gap-3 cursor-pointer border-none bg-transparent ${
-                  i === slashIndex ? "bg-[var(--color-bg-muted)]" : "hover:bg-[var(--color-bg-muted)]"
-                }`}
+                className="w-full text-left px-3 py-2 flex items-center gap-3 cursor-pointer border-none bg-transparent hover:bg-[var(--color-bg-muted)]"
+                style={i === slashIndex ? { backgroundColor: "var(--color-accent-soft)", color: "var(--color-accent)" } : undefined}
                 onMouseDown={(e) => { e.preventDefault(); selectSlashItem(item); }}
                 onMouseEnter={() => setSlashIndex(i)}
               >
