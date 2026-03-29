@@ -17,4 +17,4 @@ export type ChatMessage =
   | { role: "tool_request"; id: string; name: string; args: string; decision?: "allow" | "deny" | "always"; timestamp: number }
   | { role: "tool_result"; name: string; result: string; timestamp: number }
   | { role: "error"; text: string; timestamp: number }
-  | { role: "activity"; steps: ActivityStep[]; collapsed: boolean; timestamp: number };
+  | { role: "activity"; steps: ActivityStep[]; collapsed: boolean; timestamp: number; inputTokens?: number; outputTokens?: number };

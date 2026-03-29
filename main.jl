@@ -49,7 +49,11 @@ struct StreamToken
   text::String
 end
 
-struct AgentDone end
+struct AgentDone
+  input_tokens::Int
+  output_tokens::Int
+end
+AgentDone() = AgentDone(0, 0)
 
 # Interface → Agent events (per-message approvals channel)
 struct UserInput
@@ -721,6 +725,8 @@ function _process_message(user_input::String, agent::Agent;
 
   max_steps = get(CONFIG, "max_steps", 1000)
   hit_limit = false
+  total_input_tokens = 0
+  total_output_tokens = 0
   for step in 1:max_steps
     if step > 1 && step % 5 == 0
       user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
@@ -764,6 +770,12 @@ function _process_message(user_input::String, agent::Agent;
     response_text = String(take!(buf))
     tool_calls = stream.tool_calls
     finish_reason = stream.finish_reason
+    # Accumulate token usage
+    try
+      input_tok, output_tok = stream.tokens
+      total_input_tokens += Int(input_tok.value)
+      total_output_tokens += Int(output_tok.value)
+    catch; end
     close(stream)
 
     # No tool calls — treat as final text response
@@ -833,7 +845,7 @@ function _process_message(user_input::String, agent::Agent;
     put!(outbox, AgentMessage("Stopped: reached the maximum of $max_steps steps."))
   end
 
-  put!(outbox, AgentDone())
+  put!(outbox, AgentDone(total_input_tokens, total_output_tokens))
 
   push!(agent.history, UserMessage(user_input))
   for i in length(messages):-1:1

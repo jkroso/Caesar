@@ -65,7 +65,7 @@ export default function MessageItem({ message }: Props) {
       return null;
 
     case "activity":
-      return <ActivityBlock steps={message.steps} collapsed={message.collapsed} />;
+      return <ActivityBlock steps={message.steps} collapsed={message.collapsed} inputTokens={message.inputTokens} outputTokens={message.outputTokens} />;
 
     case "error":
       return (

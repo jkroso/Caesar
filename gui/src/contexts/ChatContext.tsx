@@ -14,7 +14,7 @@ type ChatAction =
   | { type: "insert_before_queued"; message: ChatMessage }
   | { type: "update_tool_decision"; id: string; decision: "allow" | "deny" | "always" }
   | { type: "append_activity_step"; step: ActivityStep }
-  | { type: "collapse_activity" }
+  | { type: "collapse_activity"; inputTokens?: number; outputTokens?: number }
   | { type: "increment_pending" }
   | { type: "decrement_pending" }
   | { type: "dequeue_next" }
@@ -59,7 +59,9 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         messages: state.messages.map((m) =>
-          m.role === "activity" && !m.collapsed ? { ...m, collapsed: true } : m
+          m.role === "activity" && !m.collapsed
+            ? { ...m, collapsed: true, inputTokens: action.inputTokens, outputTokens: action.outputTokens }
+            : m
         ),
       };
     }
@@ -231,7 +233,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         case "agent_done": {
           console.log("%c[Agent] Done", "color: #6b7280; font-weight: bold");
           if (isForActive) {
-            dispatch({ type: "collapse_activity" });
+            dispatch({ type: "collapse_activity", inputTokens: event.input_tokens, outputTokens: event.output_tokens });
             dispatch({ type: "decrement_pending" });
             const convId = eventConvId || activeIdRef.current;
             // Generate title after first response completes (deferred to avoid racing the LLM)

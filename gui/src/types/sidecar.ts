@@ -6,7 +6,7 @@ export type SidecarEvent =
   | WithConversationId<{ type: "agent_message"; text: string }>
   | WithConversationId<{ type: "tool_call_request"; id: string; name: string; args: string }>
   | WithConversationId<{ type: "tool_result"; name: string; result: string }>
-  | WithConversationId<{ type: "agent_done" }>
+  | WithConversationId<{ type: "agent_done"; input_tokens?: number; output_tokens?: number }>
   | WithConversationId<{ type: "error"; text: string }>
   | { type: "ready" }
   | WithConversationId<{ type: "command_result"; name: string; result: string }>
