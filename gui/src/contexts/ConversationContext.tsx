@@ -93,15 +93,18 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     );
   }, [send]);
 
+  const sendRef = useRef(send);
+  sendRef.current = send;
+
   const saveMessages = useCallback((id: string, messages: ChatMessage[]) => {
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, messages, updatedAt: Date.now() } : c))
     );
     // Persist to backend DB
     if (messages.length > 0) {
-      send({ type: "conversation_save_messages", id, messages });
+      sendRef.current({ type: "conversation_save_messages", id, messages });
     }
-  }, [send]);
+  }, []);
 
   const appendMessage = useCallback((id: string, message: ChatMessage) => {
     setConversations((prev) =>
