@@ -1,7 +1,7 @@
 import { createContext, useContext, useReducer, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { useSidecar } from "./SidecarContext";
 import { useConversations } from "./ConversationContext";
-import type { ChatMessage } from "@/types/message";
+import type { ChatMessage, ActivityStep } from "@/types/message";
 import type { SidecarEvent } from "@/types/sidecar";
 
 interface ChatState {
@@ -13,6 +13,8 @@ type ChatAction =
   | { type: "add_message"; message: ChatMessage }
   | { type: "insert_before_queued"; message: ChatMessage }
   | { type: "update_tool_decision"; id: string; decision: "allow" | "deny" | "always" }
+  | { type: "append_activity_step"; step: ActivityStep }
+  | { type: "collapse_activity" }
   | { type: "increment_pending" }
   | { type: "decrement_pending" }
   | { type: "dequeue_next" }
@@ -42,6 +44,25 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
             : m
         ),
       };
+    case "append_activity_step": {
+      const msgs = [...state.messages];
+      const lastIdx = msgs.length - 1;
+      const last = lastIdx >= 0 ? msgs[lastIdx] : null;
+      if (last && last.role === "activity" && !last.collapsed) {
+        msgs[lastIdx] = { ...last, steps: [...last.steps, action.step] };
+      } else {
+        msgs.push({ role: "activity", steps: [action.step], collapsed: false, timestamp: action.step.timestamp });
+      }
+      return { ...state, messages: msgs };
+    }
+    case "collapse_activity": {
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.role === "activity" && !m.collapsed ? { ...m, collapsed: true } : m
+        ),
+      };
+    }
     case "increment_pending":
       return { ...state, pendingCount: state.pendingCount + 1 };
     case "decrement_pending":
@@ -182,9 +203,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
         case "tool_call_request": {
           console.log("%c[Agent] Tool Call → %s", "color: #f59e0b; font-weight: bold", event.name, event.args);
+          // Still show approval card for tool requests that need confirmation
           const toolReqMsg = { role: "tool_request" as const, id: event.id, name: event.name, args: event.args, timestamp: now };
           if (isForActive) {
             dispatch({ type: "insert_before_queued", message: toolReqMsg });
+            dispatch({ type: "append_activity_step", step: { type: "tool_call", name: event.name, detail: event.args, timestamp: now } });
           } else {
             appendMessage(eventConvId!, toolReqMsg);
           }
@@ -192,11 +215,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
         case "tool_result": {
           console.log("%c[Agent] Tool Result ← %s", "color: #10b981; font-weight: bold", event.name, event.result);
-          const toolResMsg = { role: "tool_result" as const, name: event.name, result: event.result, timestamp: now };
           if (isForActive) {
-            dispatch({ type: "insert_before_queued", message: toolResMsg });
-          } else {
-            appendMessage(eventConvId!, toolResMsg);
+            dispatch({ type: "append_activity_step", step: { type: "tool_result", name: event.name, detail: event.result, timestamp: now } });
           }
           break;
         }
@@ -211,6 +231,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         case "agent_done": {
           console.log("%c[Agent] Done", "color: #6b7280; font-weight: bold");
           if (isForActive) {
+            dispatch({ type: "collapse_activity" });
             dispatch({ type: "decrement_pending" });
             const convId = eventConvId || activeIdRef.current;
             // Generate title after first response completes (deferred to avoid racing the LLM)

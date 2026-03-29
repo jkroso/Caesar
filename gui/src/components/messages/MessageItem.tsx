@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import ToolApprovalCard from "./ToolApprovalCard";
+import ActivityBlock from "./ActivityBlock";
 import type { ChatMessage } from "@/types/message";
 
 interface Props {
@@ -62,6 +63,9 @@ export default function MessageItem({ message }: Props) {
 
     case "tool_result":
       return null;
+
+    case "activity":
+      return <ActivityBlock steps={message.steps} collapsed={message.collapsed} />;
 
     case "error":
       return (
