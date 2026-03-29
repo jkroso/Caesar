@@ -129,11 +129,18 @@ function handle_providers_list()
   else
     search_providers()
   end
+  # Find logos directory in LLM.jl package
+  llm_logos_dir = let m = methods(search_providers).ms
+    isempty(m) ? nothing : joinpath(dirname(dirname(string(m[1].file))), "logos")
+  end
   # Strip models from provider data (too large), just send metadata
   data = [Dict{String,Any}(
     "id" => get(p, "id", ""),
     "name" => get(p, "name", ""),
-    "logo" => let l = get(p, "logo", nothing); l !== nothing && isfile(l) ? "data:image/svg+xml;base64," * Base64.base64encode(read(l)) : nothing end
+    "logo" => let id = get(p, "id", "")
+      logo_path = llm_logos_dir !== nothing ? joinpath(llm_logos_dir, "$id.svg") : ""
+      isfile(logo_path) ? "data:image/svg+xml;base64," * Base64.base64encode(read(logo_path)) : nothing
+    end
   ) for p in result]
   emit(Dict("type" => "providers", "data" => data))
 end
