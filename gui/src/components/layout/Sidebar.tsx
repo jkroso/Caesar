@@ -39,11 +39,11 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
     return a.id.localeCompare(b.id);
   });
 
-  // Group conversations by agentId, sorted newest first
+  // Group conversations by agentId, sorted newest first by creation time (stable order)
   const convsByAgent = (agentId: string) =>
     conversations
       .filter((c) => c.agentId === agentId)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+      .sort((a, b) => b.createdAt - a.createdAt);
 
   // Collapsed icon-only rail
   if (!open) {
