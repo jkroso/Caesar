@@ -2,9 +2,12 @@ import { Paperclip } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import julia from "highlight.js/lib/languages/julia";
 import ToolApprovalCard from "./ToolApprovalCard";
 import ActivityBlock from "./ActivityBlock";
 import type { ChatMessage } from "@/types/message";
+
+const rehypeHighlightOptions = { languages: { julia } };
 
 interface Props {
   message: ChatMessage;
@@ -43,7 +46,7 @@ export default function MessageItem({ message }: Props) {
     case "agent":
       return (
         <div className="mb-5 prose-agent" style={{ animation: "fadeIn 250ms ease forwards" }}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, rehypeHighlightOptions]]}>
             {message.text}
           </ReactMarkdown>
         </div>
