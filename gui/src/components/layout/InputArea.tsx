@@ -29,7 +29,7 @@ export default function InputArea({ centered }: Props) {
   const [slashState, setSlashState] = useState<{ query: string; start: number } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const { sendMessage } = useChat();
-  const { status, send, onEvent } = useSidecar();
+  const { status, call } = useSidecar();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashRef = useRef<HTMLDivElement>(null);
@@ -43,12 +43,8 @@ export default function InputArea({ centered }: Props) {
 
   // Fetch slash completions on mount
   useEffect(() => {
-    const unsub = onEvent((event) => {
-      if (event.type === "slash_completions") setSlashItems(event.data);
-    });
-    send({ type: "slash_completions" });
-    return unsub;
-  }, [send, onEvent]);
+    call({ type: "slash_completions" }).then((res) => setSlashItems(res.data));
+  }, [call]);
 
   // Filter items based on current slash token
   // Mid-message slash only shows skills (commands only work at start of input)

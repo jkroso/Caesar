@@ -6,17 +6,16 @@
 # can filter them from Julia noise.
 # ═══════════════════════════════════════════════════════════════════════
 
-@use "./main"...
-@use "./scheduler"...
+@use "github.com/jkroso/JSON.jl" parse_json write_json
+@use "github.com/jkroso/HTTP.jl/client" GET
 @use "./gateway/telegram"...
-@use Dates...
-@use HTTP
-@use "github.com/jkroso/JSON.jl" parse_json
-@use "github.com/jkroso/JSON.jl/write" json
-@use SQLite
-@use YAML
-@use UUIDs
+@use "./scheduler"...
+@use "."...
 @use Base64...
+@use SQLite
+@use Dates...
+@use UUIDs
+@use YAML
 
 const last_user_activity_at = Ref{DateTime}(now(Dates.UTC))
 
@@ -40,10 +39,14 @@ const PENDING_GUI_APPROVALS = Dict{UInt64, Channel}()
 # ── Output helpers ────────────────────────────────────────────────────
 
 function emit(obj; conversation_id::Union{String,Nothing}=nothing)
+  req_id = get(task_local_storage(), :request_id, nothing)
+  if req_id !== nothing
+    obj["id"] = req_id
+  end
   if conversation_id !== nothing
     obj["conversation_id"] = conversation_id
   end
-  println("PROSCA:", json(obj))
+  println("PROSCA:", write_json(obj))
   flush(stdout)
 end
 
@@ -76,11 +79,10 @@ end
 
 # ── Command handlers ─────────────────────────────────────────────────
 
-function handle_config_get()
-  emit(Dict("type" => "config", "data" => CONFIG))
-end
+handle(::Val{:config_get}, msg) = emit(Dict("type" => "config", "data" => CONFIG))
 
-function handle_config_set(key::String, value)
+function handle(::Val{:config_set}, msg)
+  key, value = string(msg["key"]), msg["value"]
   CONFIG[key] = value
   YAML.write_file(string(HOME * "config.yaml"), CONFIG)
   if key == "llm"
@@ -91,17 +93,17 @@ function handle_config_set(key::String, value)
   emit(Dict("type" => "config", "data" => CONFIG))
 end
 
-function handle_skills_list()
+function handle(::Val{:skills_list}, msg)
   skills = [Dict("name" => s.name, "description" => s.description, "file" => "") for s in values(SKILLS)]
   emit(Dict("type" => "skills", "data" => skills))
 end
 
-function handle_commands_list()
+function handle(::Val{:commands_list}, msg)
   cmds = [Dict("name" => c.name, "description" => c.description) for c in values(COMMANDS)]
   emit(Dict("type" => "commands", "data" => cmds))
 end
 
-function handle_slash_completions()
+function handle(::Val{:slash_completions}, msg)
   items = vcat(
     [Dict("name" => c.name, "description" => c.description, "kind" => "command") for c in values(COMMANDS)],
     [Dict("name" => s.name, "description" => s.description, "kind" => "skill") for s in values(SKILLS)]
@@ -111,20 +113,62 @@ function handle_slash_completions()
 end
 
 
-function handle_model_search(query::String)
-  allowed = get(CONFIG, "providers", nothing)
-  results = if allowed isa Vector
-    ids = string.(allowed)
-    all_results = search_models(query; provider=ids, max_results=50)
-    filter(m -> get(m, "provider", "") in ids, all_results)[1:min(20, end)]
-  else
-    search_models(query; max_results=20)
+function fetch_ollama_models()::Vector{Dict{String,Any}}
+  url = get(CONFIG, "ollama_url", "http://127.0.0.1:11434")
+  resp = GET("$url/api/tags")
+  data = parse_json(resp)
+  models = get(data, "models", [])
+  map(models) do m
+    name = get(m, "name", "")
+    details = get(m, "details", Dict())
+    family = get(details, "family", "")
+    param_size = get(details, "parameter_size", "")
+    display_name = isempty(param_size) ? name : "$name ($param_size)"
+    Dict{String,Any}(
+      "provider" => "ollama",
+      "id" => "ollama/$name",
+      "name" => display_name,
+      "release_date" => "",
+      "reasoning" => false,
+      "tool_call" => occursin("tool", lowercase(family)) || occursin("qwen", lowercase(name)),
+      "modalities" => Dict("input" => ["text"], "output" => ["text"]),
+      "context" => nothing,
+      "cost" => nothing)
   end
-  emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
 end
 
-function handle_providers_list()
-  try
+function handle(::Val{:model_search}, msg)
+  req_id = get(task_local_storage(), :request_id, nothing)
+  @async begin
+    task_local_storage(:request_id, req_id)
+    query = string(get(msg, "query", ""))
+    allowed = get(CONFIG, "providers", nothing)
+    results = if allowed isa Vector
+      ids = string.(allowed)
+      all_results = search_models(query; provider=ids, max_results=50)
+      filter(m -> get(m, "provider", "") in ids, all_results)[1:min(20, end)]
+    else
+      search_models(query; max_results=20)
+    end
+    # Append local Ollama models (always — not gated by providers config)
+    try
+      ollama = fetch_ollama_models()
+      q = lowercase(query)
+      if !isempty(q)
+        filter!(m -> occursin(q, lowercase(m["id"])) || occursin(q, lowercase(m["name"])), ollama)
+      end
+      append!(results, ollama)
+    catch e
+      @debug "Ollama not available" exception=e
+    end
+    emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
+  end
+end
+
+function handle(::Val{:providers_list}, msg)
+  req_id = get(task_local_storage(), :request_id, nothing)
+  @async try
+    task_local_storage(:request_id, req_id)
     allowed = get(CONFIG, "providers", nothing)
     result = if allowed isa Vector
       ids = string.(allowed)
@@ -145,14 +189,20 @@ function handle_providers_list()
       end
       Dict{String,Any}("id" => id, "name" => get(p, "name", ""), "logo" => logo)
     end
+    # Add local Ollama as a provider if reachable (always — not gated by providers config)
+    try
+      fetch_ollama_models() # just to check connectivity
+      push!(data, Dict{String,Any}("id" => "ollama", "name" => "Ollama (local)", "logo" => nothing))
+    catch; end
     emit(Dict("type" => "providers", "data" => data))
   catch e
-    @warn "handle_providers_list failed" exception=e
+    @warn "handle providers_list failed" exception=e
     emit(Dict("type" => "providers", "data" => []))
   end
 end
 
-function handle_reset(conv_id::Union{String,Nothing}=nothing)
+function handle(::Val{:reset}, msg)
+  conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
   if conv_id !== nothing && haskey(GUI_CONVERSATIONS, conv_id)
     conv = GUI_CONVERSATIONS[conv_id]
     empty!(conv.history)
@@ -163,16 +213,24 @@ function handle_reset(conv_id::Union{String,Nothing}=nothing)
   end
 end
 
-function handle_generate_title(text::String; conversation_id::Union{String,Nothing}=nothing)
-  messages = Message[
-    SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
-    UserMessage(text)
-  ]
-  title = strip(llm_generate(messages))
-  emit(Dict("type" => "title", "title" => title); conversation_id)
+function handle(::Val{:generate_title}, msg)
+  req_id = get(task_local_storage(), :request_id, nothing)
+  @async begin
+    task_local_storage(:request_id, req_id)
+    text = string(get(msg, "text", ""))
+    conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
+    messages = Message[
+      SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
+      UserMessage(text)
+    ]
+    title = strip(llm_generate(messages))
+    emit(Dict("type" => "title", "title" => title); conversation_id=conv_id)
+  end
 end
 
-function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing)
+function handle(::Val{:restore_context}, msg)
+  conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
+  messages = get(msg, "messages", [])
   history = if conv_id !== nothing
     conv = get_gui_conversation(conv_id)
     empty!(conv.auto_allowed)
@@ -182,9 +240,9 @@ function handle_restore_context(messages; conv_id::Union{String,Nothing}=nothing
     default_agent().history
   end
   empty!(history)
-  for msg in messages
-    role = string(get(msg, "role", ""))
-    text = string(get(msg, "text", ""))
+  for m in messages
+    role = string(get(m, "role", ""))
+    text = string(get(m, "text", ""))
     if role == "user"
       push!(history, UserMessage(text))
     elseif role == "agent"
@@ -199,7 +257,7 @@ end
 
 # ── Project CRUD ─────────────────────────────────────────────────────
 
-function handle_projects_list()
+function handle(::Val{:projects_list}, msg)
   rows = SQLite.DBInterface.execute(DB[], """
     SELECT p.*, (SELECT COUNT(*) FROM routines WHERE project_id=p.id) as routine_count
     FROM projects p ORDER BY is_default DESC, name ASC
@@ -215,7 +273,7 @@ function handle_projects_list()
   emit(Dict("type" => "projects", "data" => data))
 end
 
-function handle_project_create(msg)
+function handle(::Val{:project_create}, msg)
   name = string(get(msg, "name", ""))
   path = string(get(msg, "path", ""))
   model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
@@ -245,10 +303,10 @@ function handle_project_create(msg)
     end
   end
 
-  handle_projects_list()
+  handle(Val(:projects_list), msg)
 end
 
-function handle_project_update(msg)
+function handle(::Val{:project_update}, msg)
   id = string(get(msg, "id", ""))
   isempty(id) && return
 
@@ -271,10 +329,10 @@ function handle_project_update(msg)
   isempty(sets) && return
   push!(vals, id)
   SQLite.execute(DB[], "UPDATE projects SET $(join(sets, ", ")) WHERE id=?", vals)
-  handle_projects_list()
+  handle(Val(:projects_list), msg)
 end
 
-function handle_project_delete(msg)
+function handle(::Val{:project_delete}, msg)
   id = string(get(msg, "id", ""))
   rows = SQLite.DBInterface.execute(DB[], "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
   if length(rows) > 0 && rows[1].is_default == 1
@@ -284,12 +342,12 @@ function handle_project_delete(msg)
   SQLite.execute(DB[], "DELETE FROM routine_runs WHERE project_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM routines WHERE project_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM projects WHERE id=?", (id,))
-  handle_projects_list()
+  handle(Val(:projects_list), msg)
 end
 
 # ── Routine CRUD ─────────────────────────────────────────────────────
 
-function handle_routines_list(msg)
+function handle(::Val{:routines_list}, msg)
   project_id = let v = get(msg, "project_id", nothing); v === nothing ? nothing : string(v) end
   query = if project_id !== nothing
     SQLite.DBInterface.execute(DB[], """
@@ -318,7 +376,7 @@ function handle_routines_list(msg)
   emit(Dict("type" => "routines", "data" => data))
 end
 
-function handle_routine_create(msg)
+function handle(::Val{:routine_create}, msg)
   project_id = string(get(msg, "project_id", ""))
   prompt = string(get(msg, "prompt", ""))
   schedule_natural = string(get(msg, "schedule_natural", ""))
@@ -389,10 +447,10 @@ NAME: <short name>"""
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   """, (id, project_id, name, prompt, model, schedule_natural, schedule_cron, next_run))
 
-  handle_routines_list(msg)
+  handle(Val(:routines_list), msg)
 end
 
-function handle_routine_update(msg)
+function handle(::Val{:routine_update}, msg)
   id = string(get(msg, "id", ""))
   isempty(id) && return
 
@@ -426,17 +484,17 @@ function handle_routine_update(msg)
   isempty(sets) && return
   push!(vals, id)
   SQLite.execute(DB[], "UPDATE routines SET $(join(sets, ", ")) WHERE id=?", vals)
-  handle_routines_list(msg)
+  handle(Val(:routines_list), msg)
 end
 
-function handle_routine_delete(msg)
+function handle(::Val{:routine_delete}, msg)
   id = string(get(msg, "id", ""))
   SQLite.execute(DB[], "DELETE FROM routine_runs WHERE routine_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM routines WHERE id=?", (id,))
-  handle_routines_list(msg)
+  handle(Val(:routines_list), msg)
 end
 
-function handle_routine_runs_list(msg)
+function handle(::Val{:routine_runs_list}, msg)
   project_id = let v = get(msg, "project_id", nothing); v === nothing ? nothing : string(v) end
   unseen_only = get(msg, "unseen_only", false)
 
@@ -459,7 +517,7 @@ function handle_routine_runs_list(msg)
   emit(Dict("type" => "routine_runs", "data" => data))
 end
 
-function handle_routine_runs_mark_seen(msg)
+function handle(::Val{:routine_runs_mark_seen}, msg)
   ids = get(msg, "ids", [])
   for id in ids
     SQLite.execute(DB[], "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
@@ -470,38 +528,42 @@ end
 
 # ── Agent CRUD ───────────────────────────────────────────────────────
 
-function handle_agents_list()
+function handle(::Val{:agents_list}, msg)
   data = [Dict("id" => a.id) for a in values(AGENTS)]
   sort!(data; by=d -> d["id"] == "prosca" ? "" : d["id"])
   emit(Dict("type" => "agents", "data" => data))
 end
 
-function handle_agent_create(msg)
-  name = string(get(msg, "name", ""))
-  description = string(get(msg, "description", ""))
-  isempty(name) && (emit(Dict("type" => "error", "text" => "Agent name required")); return)
-  if !all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name)
-    emit(Dict("type" => "error", "text" => "Agent name must be alphanumeric (hyphens/underscores allowed)")); return
+function handle(::Val{:agent_create}, msg)
+  req_id = get(task_local_storage(), :request_id, nothing)
+  @async begin
+    task_local_storage(:request_id, req_id)
+    name = string(get(msg, "name", ""))
+    description = string(get(msg, "description", ""))
+    isempty(name) && (emit(Dict("type" => "error", "text" => "Agent name required")); return)
+    if !all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name)
+      emit(Dict("type" => "error", "text" => "Agent name must be alphanumeric (hyphens/underscores allowed)")); return
+    end
+    haskey(AGENTS, name) && (emit(Dict("type" => "error", "text" => "Agent '$name' already exists")); return)
+    agent = create_agent!(name, description)
+    if agent === nothing
+      emit(Dict("type" => "error", "text" => "Failed to create agent '$name'"))
+      return
+    end
+    handle(Val(:agents_list), Dict())
   end
-  haskey(AGENTS, name) && (emit(Dict("type" => "error", "text" => "Agent '$name' already exists")); return)
-  agent = create_agent!(name, description)
-  if agent === nothing
-    emit(Dict("type" => "error", "text" => "Failed to create agent '$name'"))
-    return
-  end
-  handle_agents_list()
 end
 
-function handle_agent_update(msg)
+function handle(::Val{:agent_update}, msg)
   id = string(get(msg, "id", ""))
   isempty(id) && return
   soul = let v = get(msg, "soul", nothing); v === nothing ? nothing : string(v) end
   instructions = let v = get(msg, "instructions", nothing); v === nothing ? nothing : string(v) end
   update_agent!(id; soul, instructions)
-  handle_agents_list()
+  handle(Val(:agents_list), Dict())
 end
 
-function handle_agent_delete(msg)
+function handle(::Val{:agent_delete}, msg)
   id = string(get(msg, "id", ""))
   if id == "prosca"
     emit(Dict("type" => "error", "text" => "Cannot delete the default agent")); return
@@ -509,12 +571,12 @@ function handle_agent_delete(msg)
   if !delete_agent!(id)
     emit(Dict("type" => "error", "text" => "Agent '$id' not found")); return
   end
-  handle_agents_list()
+  handle(Val(:agents_list), Dict())
 end
 
 # ── Conversation CRUD ────────────────────────────────────────────────
 
-function handle_conversations_list()
+function handle(::Val{:conversations_list}, msg)
   rows = SQLite.DBInterface.execute(DB[], """
     SELECT * FROM conversations ORDER BY updated_at DESC
   """) |> SQLite.rowtable
@@ -528,14 +590,14 @@ function handle_conversations_list()
   emit(Dict("type" => "conversations", "data" => data))
 end
 
-function handle_conversation_save_messages(msg)
+function handle(::Val{:conversation_save_messages}, msg)
   id = string(get(msg, "id", ""))
   messages = get(msg, "messages", [])
   SQLite.execute(DB[], "UPDATE conversations SET messages=?, updated_at=datetime('now') WHERE id=?",
-                 (json(messages), id))
+                 (write_json(messages), id))
 end
 
-function handle_conversation_create(msg)
+function handle(::Val{:conversation_create}, msg)
   agent_id = string(get(msg, "agent_id", "prosca"))
   haskey(AGENTS, agent_id) || (emit(Dict("type" => "error", "text" => "Unknown agent '$agent_id'")); return)
   id = string(UUIDs.uuid4())
@@ -543,22 +605,102 @@ function handle_conversation_create(msg)
     INSERT INTO conversations (id, agent_id, title, created_at, updated_at)
     VALUES (?, ?, 'New chat', datetime('now'), datetime('now'))
   """, (id, agent_id))
-  handle_conversations_list()
+  handle(Val(:conversations_list), Dict())
 end
 
-function handle_conversation_delete(msg)
+function handle(::Val{:conversation_delete}, msg)
   id = string(get(msg, "id", ""))
   SQLite.execute(DB[], "DELETE FROM conversations WHERE id=?", (id,))
   delete!(GUI_CONVERSATIONS, id)
-  handle_conversations_list()
+  handle(Val(:conversations_list), Dict())
 end
 
-function handle_conversation_update_title(msg)
+function handle(::Val{:conversation_update_title}, msg)
   id = string(get(msg, "id", ""))
   title = string(get(msg, "title", ""))
   SQLite.execute(DB[], "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
-  handle_conversations_list()
+  handle(Val(:conversations_list), Dict())
 end
+
+# ── Message handlers (inline) ────────────────────────────────────────
+
+function handle(::Val{:user_message}, msg)
+  text = string(get(msg, "text", ""))
+  agent_id = string(get(msg, "agent_id", "prosca"))
+  conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
+  last_user_activity_at[] = now(Dates.UTC)
+  # Intercept /commands (skills go through to the agent which handles them in process_message)
+  if startswith(text, "/") && !startswith(text, "//")
+    parts = split(text, limit=2)
+    cmd_name = parts[1][2:end]
+    if haskey(COMMANDS, cmd_name)
+      cmd_args = length(parts) > 1 ? strip(String(parts[2])) : ""
+      result = try COMMANDS[cmd_name].fn(cmd_args) catch e "Command error: $(sprint(showerror, e))" end
+      emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)); conversation_id=conv_id)
+      return
+    end
+    # Not a command — fall through to agent (may be a skill like /browser)
+  end
+  agent = get(AGENTS, agent_id, default_agent())
+  conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
+  # Parse file attachments
+  images = Image[]
+  audio_files = Audio[]
+  docs = Document[]
+  for att in get(msg, "attachments", [])
+    mime = string(get(att, "mime", ""))
+    data = base64decode(string(get(att, "data", "")))
+    if startswith(mime, "image/")
+      push!(images, ImageData(data, mime))
+    elseif startswith(mime, "audio/")
+      fmt = split(mime, '/')[2]
+      push!(audio_files, Audio(data, fmt))
+    else
+      push!(docs, Document(data, mime))
+    end
+  end
+  outbox = Channel(32)
+  approvals = Channel(32)
+  put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed,
+                             conversation_id=conv_id, images, audio=audio_files, documents=docs))
+  @async handle_events(outbox; conversation_id=conv_id, approvals)
+end
+
+function handle(::Val{:tool_approval}, msg)
+  id = parse(UInt64, string(get(msg, "id", "0")))
+  decision_str = string(get(msg, "decision", "deny"))
+  decision = if decision_str == "allow"
+    :allow
+  elseif decision_str == "always"
+    :always
+  else
+    :deny
+  end
+  if !isempty(ROUTER.active_adapters)
+    resolve_approval(ROUTER, id, decision, :gui)
+  elseif haskey(PENDING_GUI_APPROVALS, id)
+    put!(PENDING_GUI_APPROVALS[id], ToolApproval(id, decision))
+    delete!(PENDING_GUI_APPROVALS, id)
+  end
+end
+
+function handle(::Val{:command}, msg)
+  cmd_name = string(get(msg, "name", ""))
+  cmd_args = string(get(msg, "args", ""))
+  if haskey(COMMANDS, cmd_name)
+    result = try
+      COMMANDS[cmd_name].fn(cmd_args)
+    catch e
+      "Command error: $(sprint(showerror, e))"
+    end
+    emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)))
+  else
+    emit(Dict("type" => "error", "text" => "Unknown command: $cmd_name"))
+  end
+end
+
+# Fallback for unknown message types
+handle(::Val, msg) = emit(Dict("type" => "error", "text" => "Unknown message type: $(get(msg, "type", ""))"))
 
 # ── Scheduler ─────────────────────────────────────────────────────────
 
@@ -840,8 +982,8 @@ emit(Dict("type" => "unseen_count", "count" => unseen_notable_count(DB[])))
 
 # Signal ready
 emit(Dict("type" => "ready"))
-handle_agents_list()
-handle_conversations_list()
+handle(Val(:agents_list), Dict())
+handle(Val(:conversations_list), Dict())
 
 while !eof(stdin)
   line = readline()
@@ -855,145 +997,13 @@ while !eof(stdin)
     continue
   end
 
-  msg_type = get(msg, "type", "")
-  conv_id = let v = get(msg, "conversation_id", nothing)
-    v === nothing ? nothing : string(v)
-  end
-
-  try
-    if msg_type == "user_message"
-      text = string(get(msg, "text", ""))
-      agent_id = string(get(msg, "agent_id", "prosca"))
-      last_user_activity_at[] = now(Dates.UTC)
-      # Intercept /commands (skills go through to the agent which handles them in process_message)
-      if startswith(text, "/") && !startswith(text, "//")
-        parts = split(text, limit=2)
-        cmd_name = parts[1][2:end]
-        if haskey(COMMANDS, cmd_name)
-          cmd_args = length(parts) > 1 ? strip(String(parts[2])) : ""
-          result = try COMMANDS[cmd_name].fn(cmd_args) catch e "Command error: $(sprint(showerror, e))" end
-          emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)); conversation_id=conv_id)
-          continue
-        end
-        # Not a command — fall through to agent (may be a skill like /browser)
-      end
-      agent = get(AGENTS, agent_id, default_agent())
-      conv = get_gui_conversation(conv_id === nothing ? "default" : conv_id, agent_id)
-      # Parse file attachments
-      images = Image[]
-      audio_files = Audio[]
-      docs = Document[]
-      for att in get(msg, "attachments", [])
-        mime = string(get(att, "mime", ""))
-        data = base64decode(string(get(att, "data", "")))
-        if startswith(mime, "image/")
-          push!(images, ImageData(data, mime))
-        elseif startswith(mime, "audio/")
-          fmt = split(mime, '/')[2]
-          push!(audio_files, Audio(data, fmt))
-        else
-          push!(docs, Document(data, mime))
-        end
-      end
-      outbox = Channel(32)
-      approvals = Channel(32)
-      put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed,
-                                 conversation_id=conv_id, images, audio=audio_files, documents=docs))
-      @async handle_events(outbox; conversation_id=conv_id, approvals)
-    elseif msg_type == "tool_approval"
-      id = parse(UInt64, string(get(msg, "id", "0")))
-      decision_str = string(get(msg, "decision", "deny"))
-      decision = if decision_str == "allow"
-        :allow
-      elseif decision_str == "always"
-        :always
-      else
-        :deny
-      end
-      if !isempty(ROUTER.active_adapters)
-        resolve_approval(ROUTER, id, decision, :gui)
-      elseif haskey(PENDING_GUI_APPROVALS, id)
-        put!(PENDING_GUI_APPROVALS[id], ToolApproval(id, decision))
-        delete!(PENDING_GUI_APPROVALS, id)
-      end
-    elseif msg_type == "config_get"
-      handle_config_get()
-    elseif msg_type == "config_set"
-      handle_config_set(string(msg["key"]), msg["value"])
-    elseif msg_type == "skills_list"
-      handle_skills_list()
-    elseif msg_type == "commands_list"
-      handle_commands_list()
-    elseif msg_type == "slash_completions"
-      handle_slash_completions()
-    elseif msg_type == "model_search"
-      @async handle_model_search(string(get(msg, "query", "")))
-    elseif msg_type == "providers_list"
-      @async handle_providers_list()
-    elseif msg_type == "reset"
-      handle_reset(conv_id)
-    elseif msg_type == "restore_context"
-      messages = get(msg, "messages", [])
-      handle_restore_context(messages; conv_id)
-    elseif msg_type == "generate_title"
-      text = string(get(msg, "text", ""))
-      @async handle_generate_title(text; conversation_id=conv_id)
-    elseif msg_type == "command"
-      cmd_name = string(get(msg, "name", ""))
-      cmd_args = string(get(msg, "args", ""))
-      if haskey(COMMANDS, cmd_name)
-        result = try
-          COMMANDS[cmd_name].fn(cmd_args)
-        catch e
-          "Command error: $(sprint(showerror, e))"
-        end
-        emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)))
-      else
-        emit(Dict("type" => "error", "text" => "Unknown command: $cmd_name"))
-      end
-    elseif msg_type == "projects_list"
-      handle_projects_list()
-    elseif msg_type == "project_create"
-      handle_project_create(msg)
-    elseif msg_type == "project_update"
-      handle_project_update(msg)
-    elseif msg_type == "project_delete"
-      handle_project_delete(msg)
-    elseif msg_type == "routines_list"
-      handle_routines_list(msg)
-    elseif msg_type == "routine_create"
-      handle_routine_create(msg)
-    elseif msg_type == "routine_update"
-      handle_routine_update(msg)
-    elseif msg_type == "routine_delete"
-      handle_routine_delete(msg)
-    elseif msg_type == "routine_runs_list"
-      handle_routine_runs_list(msg)
-    elseif msg_type == "routine_runs_mark_seen"
-      handle_routine_runs_mark_seen(msg)
-    elseif msg_type == "agents_list"
-      handle_agents_list()
-    elseif msg_type == "agent_create"
-      @async handle_agent_create(msg)
-    elseif msg_type == "agent_update"
-      handle_agent_update(msg)
-    elseif msg_type == "agent_delete"
-      handle_agent_delete(msg)
-    elseif msg_type == "conversations_list"
-      handle_conversations_list()
-    elseif msg_type == "conversation_create"
-      handle_conversation_create(msg)
-    elseif msg_type == "conversation_delete"
-      handle_conversation_delete(msg)
-    elseif msg_type == "conversation_update_title"
-      handle_conversation_update_title(msg)
-    elseif msg_type == "conversation_save_messages"
-      handle_conversation_save_messages(msg)
-    else
-      emit(Dict("type" => "error", "text" => "Unknown message type: $msg_type"))
+  msg_type = Symbol(get(msg, "type", ""))
+  task_local_storage(:request_id, get(msg, "id", nothing)) do
+    try
+      handle(Val(msg_type), msg)
+    catch e
+      @error "Error handling message" msg_type exception=(e, catch_backtrace())
+      emit(Dict("type" => "error", "text" => "Error: $(sprint(showerror, e))"))
     end
-  catch e
-    @error "Error handling message" msg_type exception=(e, catch_backtrace())
-    emit(Dict("type" => "error", "text" => "Error: $(sprint(showerror, e))"))
   end
 end

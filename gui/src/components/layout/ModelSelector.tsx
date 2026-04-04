@@ -10,7 +10,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   className?: string;
   dropdownPosition?: "above" | "below";
 } = {}) {
-  const { send, onEvent } = useSidecar();
+  const { call } = useSidecar();
   const { config } = useSettings();
   const [results, setResults] = useState<ModelSearchResult[]>([]);
   const [providerList, setProviderList] = useState<ProviderInfo[]>([]);
@@ -33,29 +33,21 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     if (value !== undefined) setSelectedId(value || "");
   }, [value]);
 
-  // Fetch providers once on mount
+  // Fetch providers and initial model list on mount
   useEffect(() => {
-    return onEvent((event: any) => {
-      if (event.type === "model_search_results") setResults(event.data);
-      else if (event.type === "providers") setProviderList(event.data);
-    });
-  }, [onEvent]);
-
-  useEffect(() => {
-    send({ type: "providers_list" });
-    // Fetch initial results so we can resolve provider logo for the current model
-    send({ type: "model_search", query: "" });
-  }, [send]);
+    call({ type: "providers_list" }).then((res) => setProviderList(res.data));
+    call({ type: "model_search", query: "" }).then((res) => setResults(res.data));
+  }, [call]);
 
   // Send search when query changes (debounced)
   useEffect(() => {
     if (!open) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      send({ type: "model_search", query: search || "" });
+      call({ type: "model_search", query: search || "" }).then((res) => setResults(res.data));
     }, search ? 150 : 0);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [search, open, send]);
+  }, [search, open, call]);
 
   // Close on outside click
   useEffect(() => {
@@ -82,12 +74,12 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     if (onChange) {
       onChange(model.id);
     } else {
-      send({ type: "config_set", key: "llm", value: model.id });
+      call({ type: "config_set", key: "llm", value: model.id });
     }
     setOpen(false);
     setSearch("");
     setHighlightIndex(-1);
-  }, [send, onChange]);
+  }, [call, onChange]);
 
   useEffect(() => {
     if (!keyboardNavRef.current || highlightIndex < 0 || !listRef.current) return;

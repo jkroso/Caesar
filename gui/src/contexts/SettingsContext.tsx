@@ -12,33 +12,24 @@ interface SettingsContextValue {
 const SettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent, status } = useSidecar();
+  const { call, status } = useSidecar();
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [theme, setThemeState] = useState<"light" | "dark" | "system">("system");
 
-  useEffect(() => {
-    const unsubscribe = onEvent((event) => {
-      if (event.type === "config") {
-        setConfig(event.data);
-      }
-    });
-    return unsubscribe;
-  }, [onEvent]);
-
   const refreshConfig = useCallback(() => {
     if (status === "ready") {
-      send({ type: "config_get" });
+      call({ type: "config_get" }).then((res) => setConfig(res.data));
     }
-  }, [send, status]);
+  }, [call, status]);
 
   useEffect(() => {
     refreshConfig();
   }, [refreshConfig]);
 
   const updateConfig = useCallback((key: string, value: unknown) => {
-    send({ type: "config_set", key, value });
     setConfig((prev) => ({ ...prev, [key]: value }));
-  }, [send]);
+    call({ type: "config_set", key, value }).then((res) => setConfig(res.data));
+  }, [call]);
 
   const setTheme = useCallback((t: "light" | "dark" | "system") => {
     setThemeState(t);

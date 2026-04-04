@@ -35,63 +35,52 @@ function infoToConversation(info: ConversationInfo, existing?: Conversation): Co
 }
 
 export function ConversationProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent } = useSidecar();
+  const { send, call } = useSidecar();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  // Track pending agent for auto-select after conversation_create
-  const pendingAgentRef = useRef<string | null>(null);
   // Keep a ref to conversations for use in callbacks without stale closures
   const conversationsRef = useRef<Conversation[]>(conversations);
   conversationsRef.current = conversations;
 
-  useEffect(() => {
-    return onEvent((event) => {
-      if (event.type === "conversations") {
-        const infos: ConversationInfo[] = event.data;
-        setConversations((prev) => {
-          const prevMap = new Map(prev.map((c) => [c.id, c]));
-          return infos.map((info) => infoToConversation(info, prevMap.get(info.id)));
-        });
-
-        // Auto-select the newest conversation for the pending agent
-        if (pendingAgentRef.current !== null) {
-          const agentId = pendingAgentRef.current;
-          pendingAgentRef.current = null;
-          // Find the most recently created conversation for this agent
-          const forAgent = infos.filter((i) => i.agent_id === agentId);
-          if (forAgent.length > 0) {
-            const newest = forAgent.reduce((a, b) =>
-              new Date(a.created_at).getTime() > new Date(b.created_at).getTime() ? a : b
-            );
-            setActiveId(newest.id);
-          }
-        }
-      }
+  const applyConversationList = useCallback((infos: ConversationInfo[]) => {
+    setConversations((prev) => {
+      const prevMap = new Map(prev.map((c) => [c.id, c]));
+      return infos.map((info) => infoToConversation(info, prevMap.get(info.id)));
     });
-  }, [onEvent]);
+  }, []);
 
   // Request conversation list on mount
   useEffect(() => {
-    send({ type: "conversations_list" });
-  }, [send]);
+    call({ type: "conversations_list" }).then((res) => applyConversationList(res.data));
+  }, [call, applyConversationList]);
 
   const createConversation = useCallback((agentId: string = "prosca") => {
-    send({ type: "conversation_create", agent_id: agentId });
-    pendingAgentRef.current = agentId;
-  }, [send]);
+    call({ type: "conversation_create", agent_id: agentId }).then((res) => {
+      const infos: ConversationInfo[] = res.data;
+      applyConversationList(infos);
+      // Auto-select the newest conversation for this agent
+      const forAgent = infos.filter((i) => i.agent_id === agentId);
+      if (forAgent.length > 0) {
+        const newest = forAgent.reduce((a, b) =>
+          new Date(a.created_at).getTime() > new Date(b.created_at).getTime() ? a : b
+        );
+        setActiveId(newest.id);
+      }
+    });
+  }, [call, applyConversationList]);
 
   const deleteConversation = useCallback((id: string) => {
-    send({ type: "conversation_delete", id });
     setConversations((prev) => prev.filter((c) => c.id !== id));
     setActiveId((current) => (current === id ? null : current));
-  }, [send]);
+    call({ type: "conversation_delete", id }).then((res) => applyConversationList(res.data));
+  }, [call, applyConversationList]);
 
   const renameConversation = useCallback((id: string, title: string) => {
-    send({ type: "conversation_update_title", id, title });
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title, updatedAt: Date.now() } : c))
     );
-  }, [send]);
+    call({ type: "conversation_update_title", id, title }).then((res) => applyConversationList(res.data));
+  }, [call, applyConversationList]);
 
   const sendRef = useRef(send);
   sendRef.current = send;

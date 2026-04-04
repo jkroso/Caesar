@@ -4,18 +4,12 @@ import SkillCard from "@/components/skills/SkillCard";
 import type { SkillInfo } from "@/types/sidecar";
 
 export default function SkillsPage() {
-  const { send, onEvent } = useSidecar();
+  const { call } = useSidecar();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
 
   useEffect(() => {
-    const unsubscribe = onEvent((event) => {
-      if (event.type === "skills") {
-        setSkills(event.data);
-      }
-    });
-    send({ type: "skills_list" });
-    return unsubscribe;
-  }, [send, onEvent]);
+    call({ type: "skills_list" }).then((res) => setSkills(res.data));
+  }, [call]);
 
   return (
     <div className="flex-1 overflow-y-auto p-6 max-w-[900px]" style={{ animation: "fadeIn 300ms ease" }}>

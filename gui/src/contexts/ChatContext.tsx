@@ -99,7 +99,7 @@ interface ChatContextValue {
 const ChatContext = createContext<ChatContextValue | null>(null);
 
 export function ChatProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent } = useSidecar();
+  const { send, call, onEvent } = useSidecar();
   const { activeId, conversations, saveMessages, appendMessage, getMessages, renameConversation, createConversation, setBusy, isBusy } = useConversations();
   const [state, dispatch] = useReducer(chatReducer, { messages: [], pendingCount: 0 });
   const prevActiveId = useRef(activeId);
@@ -242,7 +242,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
               titleRequestedRef.current.add(convId);
               const firstUserMsg = stateRef.current.messages.find((m) => m.role === "user");
               if (firstUserMsg && firstUserMsg.role === "user") {
-                send({ type: "generate_title", text: firstUserMsg.text, conversation_id: convId });
+                call({ type: "generate_title", text: firstUserMsg.text, conversation_id: convId })
+                  .then((res) => renameConversation(convId!, res.title));
               }
             }
             // Send next queued message if any
@@ -266,14 +267,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             }
           } else if (eventConvId) {
             setBusy(eventConvId, false);
-          }
-          break;
-        }
-        case "title": {
-          console.log("%c[Agent] Title", "color: #3b82f6; font-weight: bold", event.title);
-          const titleConvId = eventConvId || activeIdRef.current;
-          if (titleConvId) {
-            renameConversation(titleConvId, event.title);
           }
           break;
         }

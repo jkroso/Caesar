@@ -17,45 +17,47 @@ interface ProjectContextValue {
 const ProjectContext = createContext<ProjectContextValue>(null!);
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent, status } = useSidecar();
+  const { call, onEvent, status } = useSidecar();
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [runs, setRuns] = useState<RoutineRunInfo[]>([]);
   const [unseenCount, setUnseenCount] = useState(0);
 
+  // unseen_count is pushed by the backend (not a response to a request)
   useEffect(() => {
-    const unsubscribe = onEvent((event) => {
-      if (event.type === "projects") setProjects(event.data);
-      if (event.type === "routine_runs") setRuns(event.data);
+    return onEvent((event) => {
       if (event.type === "unseen_count") setUnseenCount(event.count);
     });
-    return unsubscribe;
   }, [onEvent]);
 
-  useEffect(() => {
-    if (status === "ready") send({ type: "projects_list" });
-  }, [status, send]);
+  const fetchProjects = useCallback(() => {
+    call({ type: "projects_list" }).then((res) => setProjects(res.data));
+  }, [call]);
 
-  const fetchProjects = useCallback(() => send({ type: "projects_list" }), [send]);
+  useEffect(() => {
+    if (status === "ready") fetchProjects();
+  }, [status, fetchProjects]);
 
   const createProject = useCallback((name: string, path: string, model?: string, idleCheckMins?: number) => {
-    send({ type: "project_create", name, path, model: model || undefined, idle_check_mins: idleCheckMins ?? 30 });
-  }, [send]);
+    call({ type: "project_create", name, path, model: model || undefined, idle_check_mins: idleCheckMins ?? 30 })
+      .then((res) => setProjects(res.data));
+  }, [call]);
 
   const updateProject = useCallback((id: string, updates: Record<string, unknown>) => {
-    send({ type: "project_update", id, ...updates });
-  }, [send]);
+    call({ type: "project_update", id, ...updates }).then((res) => setProjects(res.data));
+  }, [call]);
 
   const deleteProject = useCallback((id: string) => {
-    send({ type: "project_delete", id });
-  }, [send]);
+    call({ type: "project_delete", id }).then((res) => setProjects(res.data));
+  }, [call]);
 
   const fetchRuns = useCallback((projectId?: string, unseenOnly?: boolean) => {
-    send({ type: "routine_runs_list", project_id: projectId, unseen_only: unseenOnly });
-  }, [send]);
+    call({ type: "routine_runs_list", project_id: projectId, unseen_only: unseenOnly })
+      .then((res) => setRuns(res.data));
+  }, [call]);
 
   const markRunsSeen = useCallback((ids: number[]) => {
-    send({ type: "routine_runs_mark_seen", ids });
-  }, [send]);
+    call({ type: "routine_runs_mark_seen", ids }).then((res) => setUnseenCount(res.count));
+  }, [call]);
 
   return (
     <ProjectContext.Provider value={{ projects, runs, unseenCount, fetchProjects, createProject, updateProject, deleteProject, fetchRuns, markRunsSeen }}>

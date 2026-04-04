@@ -13,36 +13,28 @@ interface AgentContextValue {
 const AgentContext = createContext<AgentContextValue | null>(null);
 
 export function AgentProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent } = useSidecar();
+  const { call } = useSidecar();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
 
-  useEffect(() => {
-    return onEvent((event) => {
-      if (event.type === "agents") {
-        setAgents(event.data);
-      }
-    });
-  }, [onEvent]);
+  const fetchAgents = useCallback(() => {
+    call({ type: "agents_list" }).then((res) => setAgents(res.data));
+  }, [call]);
 
-  useEffect(() => {
-    send({ type: "agents_list" });
-  }, [send]);
+  useEffect(() => { fetchAgents(); }, [fetchAgents]);
 
   const createAgent = useCallback((name: string, description: string) => {
-    send({ type: "agent_create", name, description });
-  }, [send]);
+    call({ type: "agent_create", name, description }).then((res) => setAgents(res.data));
+  }, [call]);
 
   const deleteAgent = useCallback((id: string) => {
-    send({ type: "agent_delete", id });
-  }, [send]);
+    call({ type: "agent_delete", id }).then((res) => setAgents(res.data));
+  }, [call]);
 
   const updateAgent = useCallback((id: string, soul: string, instructions: string) => {
-    send({ type: "agent_update", id, soul, instructions });
-  }, [send]);
+    call({ type: "agent_update", id, soul, instructions }).then((res) => setAgents(res.data));
+  }, [call]);
 
-  const refreshAgents = useCallback(() => {
-    send({ type: "agents_list" });
-  }, [send]);
+  const refreshAgents = fetchAgents;
 
   return (
     <AgentContext.Provider value={{ agents, createAgent, deleteAgent, updateAgent, refreshAgents }}>

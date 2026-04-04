@@ -13,35 +13,29 @@ interface RoutineContextValue {
 const RoutineContext = createContext<RoutineContextValue>(null!);
 
 export function RoutineProvider({ children }: { children: ReactNode }) {
-  const { send, onEvent, status } = useSidecar();
+  const { call, status } = useSidecar();
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
 
-  useEffect(() => {
-    const unsubscribe = onEvent((event) => {
-      if (event.type === "routines") setRoutines(event.data);
-    });
-    return unsubscribe;
-  }, [onEvent]);
-
-  useEffect(() => {
-    if (status === "ready") send({ type: "routines_list" });
-  }, [status, send]);
-
   const fetchRoutines = useCallback((projectId?: string) => {
-    send({ type: "routines_list", project_id: projectId });
-  }, [send]);
+    call({ type: "routines_list", project_id: projectId }).then((res) => setRoutines(res.data));
+  }, [call]);
+
+  useEffect(() => {
+    if (status === "ready") fetchRoutines();
+  }, [status, fetchRoutines]);
 
   const createRoutine = useCallback((projectId: string, prompt: string, scheduleNatural: string, model?: string) => {
-    send({ type: "routine_create", project_id: projectId, prompt, schedule_natural: scheduleNatural, model: model || undefined });
-  }, [send]);
+    call({ type: "routine_create", project_id: projectId, prompt, schedule_natural: scheduleNatural, model: model || undefined })
+      .then((res) => setRoutines(res.data));
+  }, [call]);
 
   const updateRoutine = useCallback((id: string, updates: Record<string, unknown>) => {
-    send({ type: "routine_update", id, ...updates });
-  }, [send]);
+    call({ type: "routine_update", id, ...updates }).then((res) => setRoutines(res.data));
+  }, [call]);
 
   const deleteRoutine = useCallback((id: string) => {
-    send({ type: "routine_delete", id });
-  }, [send]);
+    call({ type: "routine_delete", id }).then((res) => setRoutines(res.data));
+  }, [call]);
 
   return (
     <RoutineContext.Provider value={{ routines, fetchRoutines, createRoutine, updateRoutine, deleteRoutine }}>
