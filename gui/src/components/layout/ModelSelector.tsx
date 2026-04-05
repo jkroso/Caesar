@@ -23,6 +23,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef(0);
   const keyboardNavRef = useRef(false);
 
   useEffect(() => {
@@ -44,7 +45,10 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     if (!open) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      call({ type: "model_search", query: search || "" }).then((res) => setResults(res.data));
+      const seq = ++searchSeqRef.current;
+      call({ type: "model_search", query: search || "" }).then((res) => {
+        if (seq === searchSeqRef.current) setResults(res.data);
+      });
     }, search ? 150 : 0);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [search, open, call]);
@@ -252,7 +256,12 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
             </div>
           )}
           <div className="overflow-y-auto max-h-[350px] py-1" ref={listRef} role="listbox">
-            {grouped.map((group) => (
+            {grouped.map((group) => {
+              const searchingProvider = search.includes("/") && group.id.startsWith(search.split("/")[0].toLowerCase());
+              const maxShown = searchingProvider || search ? group.models.length : 4;
+              const visibleModels = group.models.slice(0, maxShown);
+              const hiddenCount = group.models.length - visibleModels.length;
+              return (
               <div key={group.id}>
                 <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
                   {group.logo && (
@@ -262,7 +271,7 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
                     {group.name}
                   </span>
                 </div>
-                {group.models.map((m) => {
+                {visibleModels.map((m) => {
                   const idx = getItemIndex(m);
                   const highlighted = idx === highlightIndex;
                   const flags: string[] = [];
@@ -299,8 +308,14 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
                     </button>
                   );
                 })}
+                {hiddenCount > 0 && (
+                  <div className="px-6 py-1 text-[10px] text-[var(--color-text-muted)]">
+                    +{hiddenCount} more — type {group.id}/ to see all
+                  </div>
+                )}
               </div>
-            ))}
+            );
+            })}
             {filteredResults.length === 0 && (
               <div className="p-3 text-xs text-[var(--color-text-muted)] text-center">
                 {search || filters.size > 0 ? "No models match" : "Loading..."}

@@ -24,9 +24,16 @@ function fn(args::AbstractString)::String
   end
 
   # Search for models matching the query
+  provider, model_query = if contains(query, '/')
+    parts = split(query, '/'; limit=2)
+    string(parts[1]), string(parts[2])
+  else
+    "", query
+  end
   allowed = get(prosca.CONFIG, "providers", nothing)
-  provider = allowed isa Vector ? string.(allowed) : nothing
-  results = prosca.search_models(query; provider, max_results=10)
+  allowed_ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
+  all_results = prosca.search(provider, model_query; max_results=50)
+  results = allowed_ids === nothing ? all_results : filter(m -> m["provider"] in allowed_ids, all_results)[1:min(10, end)]
 
   # Exact match → switch to it
   exact = findfirst(r -> r["id"] == query, results)

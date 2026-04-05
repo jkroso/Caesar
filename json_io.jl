@@ -7,7 +7,6 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 @use "github.com/jkroso/JSON.jl" parse_json write_json
-@use "github.com/jkroso/HTTP.jl/client" GET
 @use "./gateway/telegram"...
 @use "./scheduler"...
 @use "."...
@@ -36,18 +35,28 @@ end
 # Map tool-call ID → per-message approvals channel (for direct GUI approvals without gateway)
 const PENDING_GUI_APPROVALS = Dict{UInt64, Channel}()
 
+"User-facing error — caught by the dispatch loop and sent to the frontend"
+struct UserError <: Exception
+  msg::String
+end
+
 # ── Output helpers ────────────────────────────────────────────────────
 
 function emit(obj; conversation_id::Union{String,Nothing}=nothing)
-  req_id = get(task_local_storage(), :request_id, nothing)
-  if req_id !== nothing
-    obj["id"] = req_id
-  end
   if conversation_id !== nothing
     obj["conversation_id"] = conversation_id
   end
   println("PROSCA:", write_json(obj))
   flush(stdout)
+end
+
+"Emit a response to an RPC request, attaching the request id"
+function reply(msg, result::Dict)
+  id = get(msg, "id", nothing)
+  if id !== nothing
+    result["id"] = id
+  end
+  emit(result)
 end
 
 # ── Drain agent events and emit as JSON ──────────────────────────────
@@ -79,7 +88,7 @@ end
 
 # ── Command handlers ─────────────────────────────────────────────────
 
-handle(::Val{:config_get}, msg) = emit(Dict("type" => "config", "data" => CONFIG))
+handle(::Val{:config_get}, msg) = Dict("type" => "config", "data" => CONFIG)
 
 function handle(::Val{:config_set}, msg)
   key, value = string(msg["key"]), msg["value"]
@@ -90,17 +99,17 @@ function handle(::Val{:config_set}, msg)
       agent.llm = LLM(string(value), CONFIG)
     end
   end
-  emit(Dict("type" => "config", "data" => CONFIG))
+  Dict("type" => "config", "data" => CONFIG)
 end
 
 function handle(::Val{:skills_list}, msg)
   skills = [Dict("name" => s.name, "description" => s.description, "file" => "") for s in values(SKILLS)]
-  emit(Dict("type" => "skills", "data" => skills))
+  Dict("type" => "skills", "data" => skills)
 end
 
 function handle(::Val{:commands_list}, msg)
   cmds = [Dict("name" => c.name, "description" => c.description) for c in values(COMMANDS)]
-  emit(Dict("type" => "commands", "data" => cmds))
+  Dict("type" => "commands", "data" => cmds)
 end
 
 function handle(::Val{:slash_completions}, msg)
@@ -109,96 +118,40 @@ function handle(::Val{:slash_completions}, msg)
     [Dict("name" => s.name, "description" => s.description, "kind" => "skill") for s in values(SKILLS)]
   )
   sort!(items; by=i->i["name"])
-  emit(Dict("type" => "slash_completions", "data" => items))
+  Dict("type" => "slash_completions", "data" => items)
 end
 
-
-function fetch_ollama_models()::Vector{Dict{String,Any}}
-  url = get(CONFIG, "ollama_url", "http://127.0.0.1:11434")
-  resp = GET("$url/api/tags")
-  data = parse_json(resp)
-  models = get(data, "models", [])
-  map(models) do m
-    name = get(m, "name", "")
-    details = get(m, "details", Dict())
-    family = get(details, "family", "")
-    param_size = get(details, "parameter_size", "")
-    display_name = isempty(param_size) ? name : "$name ($param_size)"
-    Dict{String,Any}(
-      "provider" => "ollama",
-      "id" => "ollama/$name",
-      "name" => display_name,
-      "release_date" => "",
-      "reasoning" => false,
-      "tool_call" => occursin("tool", lowercase(family)) || occursin("qwen", lowercase(name)),
-      "modalities" => Dict("input" => ["text"], "output" => ["text"]),
-      "context" => nothing,
-      "cost" => nothing)
+handle(::Val{:model_search}, msg) = @async begin
+  allowed = get(CONFIG, "providers", nothing)
+  ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
+  query = string(get(msg, "query", ""))
+  results = if contains(query, '/')
+    parts = split(query, '/'; limit=2)
+    search(string(parts[1]), string(parts[2]); max_results=100)
+  else
+    search(query; max_results=100)
   end
+  if ids !== nothing
+    filter!(m -> m["provider"] in ids, results)
+  end
+  unique!(m -> m["provider"] * "/" * m["id"], results)
+  Dict("type" => "model_search_results", "data" => results, "query" => query)
 end
 
-function handle(::Val{:model_search}, msg)
-  req_id = get(task_local_storage(), :request_id, nothing)
-  @async begin
-    task_local_storage(:request_id, req_id)
-    query = string(get(msg, "query", ""))
-    allowed = get(CONFIG, "providers", nothing)
-    results = if allowed isa Vector
-      ids = string.(allowed)
-      all_results = search_models(query; provider=ids, max_results=50)
-      filter(m -> get(m, "provider", "") in ids, all_results)[1:min(20, end)]
-    else
-      search_models(query; max_results=20)
+handle(::Val{:providers_list}, msg) = @async begin
+  allowed = get(CONFIG, "providers", nothing)
+  ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
+  result = isempty(ids) ? search_providers() : search_providers(ids)
+  data = map(result) do p
+    id = get(p, "id", "")
+    logo = try
+      "data:image/svg+xml;base64," * base64encode(read(get_logo(id)))
+    catch
+      nothing
     end
-    # Append local Ollama models (always — not gated by providers config)
-    try
-      ollama = fetch_ollama_models()
-      q = lowercase(query)
-      if !isempty(q)
-        filter!(m -> occursin(q, lowercase(m["id"])) || occursin(q, lowercase(m["name"])), ollama)
-      end
-      append!(results, ollama)
-    catch e
-      @debug "Ollama not available" exception=e
-    end
-    emit(Dict("type" => "model_search_results", "data" => results, "query" => query))
+    Dict{String,Any}("id" => id, "name" => get(p, "name", ""), "logo" => logo)
   end
-end
-
-function handle(::Val{:providers_list}, msg)
-  req_id = get(task_local_storage(), :request_id, nothing)
-  @async try
-    task_local_storage(:request_id, req_id)
-    allowed = get(CONFIG, "providers", nothing)
-    result = if allowed isa Vector
-      ids = string.(allowed)
-      all_providers = try providers(ids) catch; search_providers(ids) end
-      filter(p -> get(p, "id", "") in ids, all_providers)
-    else
-      search_providers()
-    end
-    # Find logos directory in LLM.jl package
-    logos_dir = joinpath(dirname(string(methods(search_providers).ms[1].file)), "logos")
-    data = map(result) do p
-      id = get(p, "id", "")
-      logo_path = joinpath(logos_dir, "$id.svg")
-      logo = try
-        isfile(logo_path) ? "data:image/svg+xml;base64," * base64encode(read(logo_path)) : nothing
-      catch
-        nothing
-      end
-      Dict{String,Any}("id" => id, "name" => get(p, "name", ""), "logo" => logo)
-    end
-    # Add local Ollama as a provider if reachable (always — not gated by providers config)
-    try
-      fetch_ollama_models() # just to check connectivity
-      push!(data, Dict{String,Any}("id" => "ollama", "name" => "Ollama (local)", "logo" => nothing))
-    catch; end
-    emit(Dict("type" => "providers", "data" => data))
-  catch e
-    @warn "handle providers_list failed" exception=e
-    emit(Dict("type" => "providers", "data" => []))
-  end
+  Dict("type" => "providers", "data" => data)
 end
 
 function handle(::Val{:reset}, msg)
@@ -211,21 +164,17 @@ function handle(::Val{:reset}, msg)
     empty!(default_agent().history)
     empty!(AUTO_ALLOWED_TOOLS)
   end
+  nothing
 end
 
-function handle(::Val{:generate_title}, msg)
-  req_id = get(task_local_storage(), :request_id, nothing)
-  @async begin
-    task_local_storage(:request_id, req_id)
-    text = string(get(msg, "text", ""))
-    conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
-    messages = Message[
-      SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
-      UserMessage(text)
-    ]
-    title = strip(llm_generate(messages))
-    emit(Dict("type" => "title", "title" => title); conversation_id=conv_id)
-  end
+handle(::Val{:generate_title}, msg) = @async begin
+  text = string(get(msg, "text", ""))
+  messages = Message[
+    SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
+    UserMessage(text)
+  ]
+  title = strip(llm_generate(messages))
+  Dict("type" => "title", "title" => title)
 end
 
 function handle(::Val{:restore_context}, msg)
@@ -253,6 +202,7 @@ function handle(::Val{:restore_context}, msg)
   if length(history) > 20
     splice!(history, 1:length(history)-20)
   end
+  nothing
 end
 
 # ── Project CRUD ─────────────────────────────────────────────────────
@@ -270,7 +220,7 @@ function handle(::Val{:projects_list}, msg)
     "cost_usd" => r.cost_usd, "last_checked_at" => something(r.last_checked_at, nothing),
     "created_at" => r.created_at, "routine_count" => r.routine_count
   ) for r in rows]
-  emit(Dict("type" => "projects", "data" => data))
+  Dict("type" => "projects", "data" => data)
 end
 
 function handle(::Val{:project_create}, msg)
@@ -279,8 +229,8 @@ function handle(::Val{:project_create}, msg)
   model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
   idle_mins = get(msg, "idle_check_mins", 30)
 
-  isempty(name) && (emit(Dict("type" => "error", "text" => "Project name required")); return)
-  isempty(path) && (emit(Dict("type" => "error", "text" => "Project path required")); return)
+  isempty(name) && throw(UserError("Project name required"))
+  isempty(path) && throw(UserError("Project path required"))
 
   path = endswith(path, "/") ? path : path * "/"
   mkpath(path)
@@ -308,7 +258,7 @@ end
 
 function handle(::Val{:project_update}, msg)
   id = string(get(msg, "id", ""))
-  isempty(id) && return
+  isempty(id) && return nothing
 
   sets = String[]
   vals = Any[]
@@ -326,7 +276,7 @@ function handle(::Val{:project_update}, msg)
       push!(vals, val)
     end
   end
-  isempty(sets) && return
+  isempty(sets) && return nothing
   push!(vals, id)
   SQLite.execute(DB[], "UPDATE projects SET $(join(sets, ", ")) WHERE id=?", vals)
   handle(Val(:projects_list), msg)
@@ -335,10 +285,7 @@ end
 function handle(::Val{:project_delete}, msg)
   id = string(get(msg, "id", ""))
   rows = SQLite.DBInterface.execute(DB[], "SELECT is_default FROM projects WHERE id=?", (id,)) |> SQLite.rowtable
-  if length(rows) > 0 && rows[1].is_default == 1
-    emit(Dict("type" => "error", "text" => "Cannot delete the default project"))
-    return
-  end
+  length(rows) > 0 && rows[1].is_default == 1 && throw(UserError("Cannot delete the default project"))
   SQLite.execute(DB[], "DELETE FROM routine_runs WHERE project_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM routines WHERE project_id=?", (id,))
   SQLite.execute(DB[], "DELETE FROM projects WHERE id=?", (id,))
@@ -373,7 +320,7 @@ function handle(::Val{:routines_list}, msg)
     "next_run_at" => something(r.next_run_at, nothing),
     "created_at" => r.created_at
   ) for r in rows]
-  emit(Dict("type" => "routines", "data" => data))
+  Dict("type" => "routines", "data" => data)
 end
 
 function handle(::Val{:routine_create}, msg)
@@ -382,8 +329,8 @@ function handle(::Val{:routine_create}, msg)
   schedule_natural = string(get(msg, "schedule_natural", ""))
   model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
 
-  isempty(project_id) && (emit(Dict("type" => "error", "text" => "Project required")); return)
-  isempty(prompt) && (emit(Dict("type" => "error", "text" => "Routine prompt required")); return)
+  isempty(project_id) && throw(UserError("Project required"))
+  isempty(prompt) && throw(UserError("Routine prompt required"))
 
   # Generate name + parse schedule in a single LLM call
   gen_prompt = """Given this routine prompt, generate a short name (2-5 words) for it."""
@@ -415,8 +362,7 @@ NAME: <short name>"""
   result = try
     llm_generate(gen_msgs)
   catch e
-    emit(Dict("type" => "error", "text" => "Failed to generate routine: $(sprint(showerror, e))"))
-    return
+    throw(UserError("Failed to generate routine: $(sprint(showerror, e))"))
   end
 
   # Parse response
@@ -436,8 +382,7 @@ NAME: <short name>"""
     try
       next_run = string(next_cron_time_utc(schedule_cron, now(Dates.UTC)))
     catch e
-      emit(Dict("type" => "error", "text" => "Invalid cron expression '$schedule_cron': $(sprint(showerror, e))"))
-      return
+      throw(UserError("Invalid cron expression '$schedule_cron': $(sprint(showerror, e))"))
     end
   end
 
@@ -514,7 +459,7 @@ function handle(::Val{:routine_runs_list}, msg)
     "tokens_used" => r.tokens_used, "cost_usd" => r.cost_usd,
     "notable" => r.notable == 1, "seen" => r.seen == 1
   ) for r in rows]
-  emit(Dict("type" => "routine_runs", "data" => data))
+  Dict("type" => "routine_runs", "data" => data)
 end
 
 function handle(::Val{:routine_runs_mark_seen}, msg)
@@ -523,7 +468,7 @@ function handle(::Val{:routine_runs_mark_seen}, msg)
     SQLite.execute(DB[], "UPDATE routine_runs SET seen=1 WHERE id=?", (id,))
   end
   count = unseen_notable_count(DB[])
-  emit(Dict("type" => "unseen_count", "count" => count))
+  Dict("type" => "unseen_count", "count" => count)
 end
 
 # ── Agent CRUD ───────────────────────────────────────────────────────
@@ -531,32 +476,23 @@ end
 function handle(::Val{:agents_list}, msg)
   data = [Dict("id" => a.id) for a in values(AGENTS)]
   sort!(data; by=d -> d["id"] == "prosca" ? "" : d["id"])
-  emit(Dict("type" => "agents", "data" => data))
+  Dict("type" => "agents", "data" => data)
 end
 
-function handle(::Val{:agent_create}, msg)
-  req_id = get(task_local_storage(), :request_id, nothing)
-  @async begin
-    task_local_storage(:request_id, req_id)
-    name = string(get(msg, "name", ""))
-    description = string(get(msg, "description", ""))
-    isempty(name) && (emit(Dict("type" => "error", "text" => "Agent name required")); return)
-    if !all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name)
-      emit(Dict("type" => "error", "text" => "Agent name must be alphanumeric (hyphens/underscores allowed)")); return
-    end
-    haskey(AGENTS, name) && (emit(Dict("type" => "error", "text" => "Agent '$name' already exists")); return)
-    agent = create_agent!(name, description)
-    if agent === nothing
-      emit(Dict("type" => "error", "text" => "Failed to create agent '$name'"))
-      return
-    end
-    handle(Val(:agents_list), Dict())
-  end
+handle(::Val{:agent_create}, msg) = @async begin
+  name = string(get(msg, "name", ""))
+  description = string(get(msg, "description", ""))
+  isempty(name) && throw(UserError("Agent name required"))
+  all(c -> isletter(c) || isdigit(c) || c in ('-', '_'), name) || throw(UserError("Agent name must be alphanumeric (hyphens/underscores allowed)"))
+  haskey(AGENTS, name) && throw(UserError("Agent '$name' already exists"))
+  agent = create_agent!(name, description)
+  agent === nothing && throw(UserError("Failed to create agent '$name'"))
+  handle(Val(:agents_list), Dict())
 end
 
 function handle(::Val{:agent_update}, msg)
   id = string(get(msg, "id", ""))
-  isempty(id) && return
+  isempty(id) && return nothing
   soul = let v = get(msg, "soul", nothing); v === nothing ? nothing : string(v) end
   instructions = let v = get(msg, "instructions", nothing); v === nothing ? nothing : string(v) end
   update_agent!(id; soul, instructions)
@@ -565,12 +501,8 @@ end
 
 function handle(::Val{:agent_delete}, msg)
   id = string(get(msg, "id", ""))
-  if id == "prosca"
-    emit(Dict("type" => "error", "text" => "Cannot delete the default agent")); return
-  end
-  if !delete_agent!(id)
-    emit(Dict("type" => "error", "text" => "Agent '$id' not found")); return
-  end
+  id == "prosca" && throw(UserError("Cannot delete the default agent"))
+  delete_agent!(id) || throw(UserError("Agent '$id' not found"))
   handle(Val(:agents_list), Dict())
 end
 
@@ -587,7 +519,7 @@ function handle(::Val{:conversations_list}, msg)
     "created_at" => r.created_at, "updated_at" => r.updated_at,
     "messages" => let m = something(r.messages, "[]"); try parse_json(m) catch; [] end end
   ) for r in rows]
-  emit(Dict("type" => "conversations", "data" => data))
+  Dict("type" => "conversations", "data" => data)
 end
 
 function handle(::Val{:conversation_save_messages}, msg)
@@ -595,11 +527,12 @@ function handle(::Val{:conversation_save_messages}, msg)
   messages = get(msg, "messages", [])
   SQLite.execute(DB[], "UPDATE conversations SET messages=?, updated_at=datetime('now') WHERE id=?",
                  (write_json(messages), id))
+  nothing
 end
 
 function handle(::Val{:conversation_create}, msg)
   agent_id = string(get(msg, "agent_id", "prosca"))
-  haskey(AGENTS, agent_id) || (emit(Dict("type" => "error", "text" => "Unknown agent '$agent_id'")); return)
+  haskey(AGENTS, agent_id) || throw(UserError("Unknown agent '$agent_id'"))
   id = string(UUIDs.uuid4())
   SQLite.execute(DB[], """
     INSERT INTO conversations (id, agent_id, title, created_at, updated_at)
@@ -636,8 +569,7 @@ function handle(::Val{:user_message}, msg)
     if haskey(COMMANDS, cmd_name)
       cmd_args = length(parts) > 1 ? strip(String(parts[2])) : ""
       result = try COMMANDS[cmd_name].fn(cmd_args) catch e "Command error: $(sprint(showerror, e))" end
-      emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)); conversation_id=conv_id)
-      return
+      return Dict("type" => "command_result", "name" => cmd_name, "result" => string(result))
     end
     # Not a command — fall through to agent (may be a skill like /browser)
   end
@@ -682,25 +614,23 @@ function handle(::Val{:tool_approval}, msg)
     put!(PENDING_GUI_APPROVALS[id], ToolApproval(id, decision))
     delete!(PENDING_GUI_APPROVALS, id)
   end
+  nothing
 end
 
 function handle(::Val{:command}, msg)
   cmd_name = string(get(msg, "name", ""))
   cmd_args = string(get(msg, "args", ""))
-  if haskey(COMMANDS, cmd_name)
-    result = try
-      COMMANDS[cmd_name].fn(cmd_args)
-    catch e
-      "Command error: $(sprint(showerror, e))"
-    end
-    emit(Dict("type" => "command_result", "name" => cmd_name, "result" => string(result)))
-  else
-    emit(Dict("type" => "error", "text" => "Unknown command: $cmd_name"))
+  haskey(COMMANDS, cmd_name) || throw(UserError("Unknown command: $cmd_name"))
+  result = try
+    COMMANDS[cmd_name].fn(cmd_args)
+  catch e
+    "Command error: $(sprint(showerror, e))"
   end
+  Dict("type" => "command_result", "name" => cmd_name, "result" => string(result))
 end
 
 # Fallback for unknown message types
-handle(::Val, msg) = emit(Dict("type" => "error", "text" => "Unknown message type: $(get(msg, "type", ""))"))
+handle(::Val, msg) = throw(UserError("Unknown message type: $(get(msg, "type", ""))"))
 
 # ── Scheduler ─────────────────────────────────────────────────────────
 
@@ -804,8 +734,8 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
         project_id=routine.project_id,
         routine_id=routine.id,
         extra_gui_emit=() -> begin
-            count = unseen_notable_count(DB[])
-            emit(Dict("type" => "unseen_count", "count" => count))
+          count = unseen_notable_count(DB[])
+          emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
 end
@@ -861,8 +791,8 @@ Review this project and determine if there's anything you can do to help move it
     route_notification(ROUTER, clean_result;
         project_id=project.id,
         extra_gui_emit=() -> begin
-            count = unseen_notable_count(DB[])
-            emit(Dict("type" => "unseen_count", "count" => count))
+          count = unseen_notable_count(DB[])
+          emit(Dict("type" => "unseen_count", "count" => count))
         end)
   end
 end
@@ -875,7 +805,7 @@ const SCHEDULER_TIMER = Timer(t -> scheduler_tick!(), 60; interval=60)
 # ── Gateway setup ───────────────────────────────────────────────────
 
 const ROUTER = PresenceRouter(;
-    idle_threshold_mins=get(get(CONFIG, "gateway", Dict()), "idle_threshold_mins", 15)
+  idle_threshold_mins=get(get(CONFIG, "gateway", Dict()), "idle_threshold_mins", 15)
 )
 
 # Wire the router's GUI emit function to our emit()
@@ -884,8 +814,8 @@ ROUTER.gui_io = (d; conversation_id=nothing) -> emit(d; conversation_id)
 # Wire GUI activity check — uses last_user_activity_at directly
 # (the GUI is the sidecar's only client, so backend activity == GUI activity)
 ROUTER.check_gui_active = () -> begin
-    idle_secs = Dates.value(now(Dates.UTC) - last_user_activity_at[]) / 1000
-    idle_secs < ROUTER.idle_threshold_mins * 60
+  idle_secs = Dates.value(now(Dates.UTC) - last_user_activity_at[]) / 1000
+  idle_secs < ROUTER.idle_threshold_mins * 60
 end
 
 # Conversation queuing for Telegram topics (one conversation at a time per topic)
@@ -894,87 +824,87 @@ const TELEGRAM_MESSAGE_QUEUE = Dict{String, Vector{InboundEnvelope}}()
 
 # Set up inbound handler for Telegram messages → agent dispatch
 ROUTER._inbound_handler = (env::InboundEnvelope) -> begin
-    text = env.text
-    topic = env.topic_id
-    conv_id = "tg-$(topic)"
+  text = env.text
+  topic = env.topic_id
+  conv_id = "tg-$(topic)"
 
-    # Queue if a conversation is already running for this topic
-    if get(TELEGRAM_ACTIVE_CONVERSATIONS, topic, false)
-        queue = get!(TELEGRAM_MESSAGE_QUEUE, topic) do; InboundEnvelope[] end
-        push!(queue, env)
-        adapter = primary_adapter(ROUTER)
-        if adapter !== nothing
-            try send_message(adapter, OutboundEnvelope{channel_symbol(adapter)}(
-                "Message queued — I'll get to it when the current task finishes.", topic))
-            catch end
-        end
-        return
+  # Queue if a conversation is already running for this topic
+  if get(TELEGRAM_ACTIVE_CONVERSATIONS, topic, false)
+    queue = get!(TELEGRAM_MESSAGE_QUEUE, topic) do; InboundEnvelope[] end
+    push!(queue, env)
+    adapter = primary_adapter(ROUTER)
+    if adapter !== nothing
+      try send_message(adapter, OutboundEnvelope{channel_symbol(adapter)}(
+        "Message queued — I'll get to it when the current task finishes.", topic))
+      catch end
     end
+    return
+  end
 
-    TELEGRAM_ACTIVE_CONVERSATIONS[topic] = true
-    conv = get_gui_conversation(conv_id)
-    outbox = Channel(32)
-    approvals = Channel(32)
-    agent = get(AGENTS, conv.agent_id, default_agent())
-    put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
-    # Drain agent events and send back to Telegram
-    @async begin
-        adapter = primary_adapter(ROUTER)
-        adapter === nothing && return
-        while true
-            event = take!(outbox)
-            if event isa AgentMessage
-                try
-                    out = OutboundEnvelope{:telegram}(event.text, env.topic_id)
-                    send_message(adapter, out)
-                catch e
-                    @warn "Failed to send agent response to Telegram" exception=e
-                end
-            elseif event isa ToolCallRequest
-                @async route_approval(ROUTER, event, approvals; conversation_id=conv_id)
-            elseif event isa ToolResult
-                # Tool results not sent to Telegram (too noisy)
-            elseif event isa AgentDone
-                break
-            end
+  TELEGRAM_ACTIVE_CONVERSATIONS[topic] = true
+  conv = get_gui_conversation(conv_id)
+  outbox = Channel(32)
+  approvals = Channel(32)
+  agent = get(AGENTS, conv.agent_id, default_agent())
+  put!(agent.inbox, Envelope(text; outbox, approvals, auto_allowed=conv.auto_allowed, conversation_id=conv_id))
+  # Drain agent events and send back to Telegram
+  @async begin
+    adapter = primary_adapter(ROUTER)
+    adapter === nothing && return
+    while true
+      event = take!(outbox)
+      if event isa AgentMessage
+        try
+          out = OutboundEnvelope{:telegram}(event.text, env.topic_id)
+          send_message(adapter, out)
+        catch e
+          @warn "Failed to send agent response to Telegram" exception=e
         end
-        # Process queued messages for this topic
-        TELEGRAM_ACTIVE_CONVERSATIONS[topic] = false
-        queue = get(TELEGRAM_MESSAGE_QUEUE, topic, nothing)
-        if queue !== nothing && !isempty(queue)
-            next_env = popfirst!(queue)
-            ROUTER._inbound_handler(next_env)
-        end
+      elseif event isa ToolCallRequest
+        @async route_approval(ROUTER, event, approvals; conversation_id=conv_id)
+      elseif event isa ToolResult
+        # Tool results not sent to Telegram (too noisy)
+      elseif event isa AgentDone
+        break
+      end
     end
+    # Process queued messages for this topic
+    TELEGRAM_ACTIVE_CONVERSATIONS[topic] = false
+    queue = get(TELEGRAM_MESSAGE_QUEUE, topic, nothing)
+    if queue !== nothing && !isempty(queue)
+      next_env = popfirst!(queue)
+      ROUTER._inbound_handler(next_env)
+    end
+  end
 end
 
 # Initialize Telegram adapter if configured
 let gw_config = get(CONFIG, "gateway", nothing)
-    if gw_config !== nothing
-        tg_config = get(gw_config, "telegram", nothing)
-        if tg_config !== nothing
-            bot_token = string(get(tg_config, "bot_token", ""))
-            chat_id = get(tg_config, "chat_id", 0)
-            owner_id = get(tg_config, "owner_id", 0)
-            if !isempty(bot_token) && chat_id != 0 && owner_id != 0
-                adapter = TelegramAdapter(; bot_token, chat_id=Int64(chat_id), owner_id=Int64(owner_id), db=DB[])
-                register_adapter!(ROUTER, adapter)
-                try
-                    start!(adapter, ROUTER)
-                    @info "Telegram gateway active"
-                catch e
-                    @warn "Failed to start Telegram adapter" exception=e
-                end
-            end
+  if gw_config !== nothing
+    tg_config = get(gw_config, "telegram", nothing)
+    if tg_config !== nothing
+      bot_token = string(get(tg_config, "bot_token", ""))
+      chat_id = get(tg_config, "chat_id", 0)
+      owner_id = get(tg_config, "owner_id", 0)
+      if !isempty(bot_token) && chat_id != 0 && owner_id != 0
+        adapter = TelegramAdapter(; bot_token, chat_id=Int64(chat_id), owner_id=Int64(owner_id), db=DB[])
+        register_adapter!(ROUTER, adapter)
+        try
+          start!(adapter, ROUTER)
+          @info "Telegram gateway active"
+        catch e
+          @warn "Failed to start Telegram adapter" exception=e
         end
+      end
     end
+  end
 end
 
 # Timer to check pending approval migrations (every 60s)
 const APPROVAL_CHECK_TIMER = Timer(t -> begin
-    try check_pending_approvals!(ROUTER) catch e
-        @warn "Approval check error" exception=e
-    end
+  try check_pending_approvals!(ROUTER) catch e
+    @warn "Approval check error" exception=e
+  end
 end, 60; interval=60)
 
 # Emit initial unseen count
@@ -982,8 +912,8 @@ emit(Dict("type" => "unseen_count", "count" => unseen_notable_count(DB[])))
 
 # Signal ready
 emit(Dict("type" => "ready"))
-handle(Val(:agents_list), Dict())
-handle(Val(:conversations_list), Dict())
+emit(handle(Val(:agents_list), Dict()))
+emit(handle(Val(:conversations_list), Dict()))
 
 while !eof(stdin)
   line = readline()
@@ -998,12 +928,30 @@ while !eof(stdin)
   end
 
   msg_type = Symbol(get(msg, "type", ""))
-  task_local_storage(:request_id, get(msg, "id", nothing)) do
-    try
-      handle(Val(msg_type), msg)
-    catch e
-      @error "Error handling message" msg_type exception=(e, catch_backtrace())
-      emit(Dict("type" => "error", "text" => "Error: $(sprint(showerror, e))"))
+  try
+    result = handle(Val(msg_type), msg)
+    if result isa Task
+      @async try
+        r = fetch(result)
+        r isa Dict && reply(msg, r)
+      catch e
+        e = e isa TaskFailedException ? e.task.result : e
+        reply(msg, if e isa UserError
+          Dict("type" => "error", "text" => e.msg)
+        else
+          @error "Error handling message" msg_type exception=(e, catch_backtrace())
+          Dict("type" => "error", "text" => "Error: $(sprint(showerror, e))")
+        end)
+      end
+    elseif result isa Dict
+      reply(msg, result)
     end
+  catch e
+    reply(msg, if e isa UserError
+      Dict("type" => "error", "text" => e.msg)
+    else
+      @error "Error handling message" msg_type exception=(e, catch_backtrace())
+      Dict("type" => "error", "text" => "Error: $(sprint(showerror, e))")
+    end)
   end
 end

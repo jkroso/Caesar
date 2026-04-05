@@ -118,10 +118,18 @@ function gather_completions(prefix::String)::Vector{String}
   if startswith(prefix, "/model ")
     partial = strip(prefix[8:end])
     if !isempty(partial)
+      provider, model_query = if contains(partial, '/')
+        parts = split(partial, '/'; limit=2)
+        string(parts[1]), string(parts[2])
+      else
+        "", partial
+      end
       allowed = get(CONFIG, "providers", nothing)
-      provider = allowed isa Vector ? string.(allowed) : nothing
-      for m in search_models(partial; provider, max_results=10)
+      allowed_ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
+      for m in search(provider, model_query; max_results=20)
+        allowed_ids === nothing || m["provider"] in allowed_ids || continue
         push!(results, "/model " * m["id"])
+        length(results) >= 10 && break
       end
     end
   elseif startswith(prefix, "/")
