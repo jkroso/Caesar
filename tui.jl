@@ -113,35 +113,28 @@ end
 
 # ── Autocomplete ─────────────────────────────────────────────────────
 
+const command_regex = r"/([\w-]+)\s"
+
 function gather_completions(prefix::String)::Vector{String}
   results = String[]
-  if startswith(prefix, "/model ")
-    partial = strip(prefix[8:end])
-    if !isempty(partial)
-      provider, model_query = if contains(partial, '/')
-        parts = split(partial, '/'; limit=2)
-        string(parts[1]), string(parts[2])
-      else
-        "", partial
-      end
-      allowed = get(CONFIG, "providers", nothing)
-      allowed_ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
-      for m in search(provider, model_query; max_results=20)
-        allowed_ids === nothing || m["provider"] in allowed_ids || continue
-        push!(results, "/model " * m["id"])
-        length(results) >= 10 && break
-      end
+  if startswith(prefix, command_regex) # command has been chosen, complete on args
+    command = match(command_regex, prefix)[1]
+    cmd = get(COMMANDS, command, nothing)
+    if cmd !== nothing && isdefined(cmd, :complete)
+      args = strip(replace(prefix, command_regex => ""; count=1))
+      push!(results, cmd.complete(String(args))...)
     end
   elseif startswith(prefix, "/")
     partial = prefix[2:end]
     for name in keys(COMMANDS)
-      startswith(name, partial) && push!(results, "/" * name)
+      startswith(name, partial) && push!(results, '/' * name)
     end
     for name in keys(SKILLS)
-      startswith(name, partial) && push!(results, "/" * name)
+      startswith(name, partial) && push!(results, '/' * name)
     end
+    sort!(results)
   end
-  sort!(results)
+  results
 end
 
 function dismiss_completions!(m::ProscaModel)
@@ -486,7 +479,7 @@ function Tachikoma.view(m::ProscaModel, f::Frame)
   status_right = Span[
     Span("^N/^P:tabs ", tstyle(:text_dim)),
     Span("Ctrl+Q:quit ", tstyle(:text_dim)),
-    Span("$(get(CONFIG, "llm", "")) ", tstyle(:primary)),
+    Span(let a = default_agent(); "$(a.llm.info.provider)/$(a.llm.info.id) " end, tstyle(:primary)),
   ]
   sbar = StatusBar(; left=status_left, right=status_right)
   render(sbar, status_rect, buf)
@@ -593,5 +586,7 @@ let model = ProscaModel()
   push_chat!(model, "Agents: $(join(keys(AGENTS), ", "))", tstyle(:text_dim))
   push_chat!(model, "Type a message and press Enter. ^N/^P to switch tabs.", tstyle(:text_dim))
   push_chat!(model, "", tstyle(:text))
-  app(model; default_bindings=true)
+  app(model; default_bindings=true, on_stderr=line -> begin
+    push_line!(model.repl_scroll, [Span(line, tstyle(:error))])
+  end)
 end

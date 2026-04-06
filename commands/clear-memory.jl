@@ -1,5 +1,6 @@
 module clear_memory
 const prosca = parentmodule(@__MODULE__)
+using .prosca.Kip
 
 const name = "clear-memory"
 const description = "Wipe the current agent's memory clean"
@@ -11,8 +12,8 @@ function fn(args::AbstractString)::String
   provider, conn = entry
 
   if provider == :hindsight
-    hs = prosca.eval(:(@use("./memory/hindsight/hindsight")))
     try
+      hs = @use("../memory/hindsight/hindsight")
       hs.api(conn, "DELETE", "/banks/$(conn.bank_id)/memories")
       "Hindsight memories cleared for agent=$agent_id"
     catch e

@@ -6,6 +6,9 @@
 # can filter them from Julia noise.
 # ═══════════════════════════════════════════════════════════════════════
 
+@use "github.com/jkroso/LLM.jl" LLM search_providers
+@use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage Image Audio Document
+@use "github.com/jkroso/LLM.jl/models" get_logo
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/telegram"...
 @use "./scheduler"...
@@ -929,10 +932,15 @@ while !eof(stdin)
 
   msg_type = Symbol(get(msg, "type", ""))
   try
+    t0 = time()
     result = handle(Val(msg_type), msg)
+    t1 = time()
     if result isa Task
       @async try
         r = fetch(result)
+        t2 = time()
+        n = r isa Dict ? length(get(r, "data", [])) : 0
+        @warn "RPC timing" msg_type handle_ms=round((t1-t0)*1000) fetch_ms=round((t2-t1)*1000) results=n
         r isa Dict && reply(msg, r)
       catch e
         e = e isa TaskFailedException ? e.task.result : e
@@ -944,6 +952,7 @@ while !eof(stdin)
         end)
       end
     elseif result isa Dict
+      @warn "RPC timing" msg_type handle_ms=round((t1-t0)*1000)
       reply(msg, result)
     end
   catch e

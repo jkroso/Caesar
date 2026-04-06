@@ -31,22 +31,22 @@ function fn(args::AbstractString)::String
     "", query
   end
   allowed = get(prosca.CONFIG, "providers", nothing)
-  allowed_ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
-  all_results = prosca.search(provider, model_query; max_results=50)
-  results = allowed_ids === nothing ? all_results : filter(m -> m["provider"] in allowed_ids, all_results)[1:min(10, end)]
+  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
+  results = prosca.search(provider, model_query; max_results=50, allowed_providers=allowed_ids)
 
   # Exact match → switch to it
-  exact = findfirst(r -> r["id"] == query, results)
+  exact = findfirst(r -> r.id == query || "$(r.provider)/$(r.id)" == query, results)
   if exact !== nothing
-    switch_model!(query)
-    return "Switched to $query ($(results[exact]["provider"]))"
+    r = results[exact]
+    switch_model!(r.id)
+    return "Switched to $(r.provider)/$(r.id)"
   end
 
   # Single result → switch to it
   if length(results) == 1
-    id = results[1]["id"]
-    switch_model!(id)
-    return "Switched to $id ($(results[1]["provider"]))"
+    r = results[1]
+    switch_model!(r.id)
+    return "Switched to $(r.provider)/$(r.id)"
   end
 
   # Multiple results → show list
@@ -58,17 +58,17 @@ function fn(args::AbstractString)::String
 
   lines = ["Models matching \"$query\":", ""]
   for r in results
-    cost = r["cost"]
-    cost_str = cost !== nothing ? " [\$$(get(cost, "input", "?"))/\$$(get(cost, "output", "?")) per Mtok]" : ""
-    ctx = r["context"]
+    p = r.pricing
+    cost_str = p !== nothing ? " [\$$(p[1])/\$$(p[2]) per Mtok]" : ""
+    ctx = r.context
     ctx_str = ctx !== nothing ? " $(div(ctx, 1000))k ctx" : ""
     flags = String[]
-    r["reasoning"] && push!(flags, "reasoning")
-    r["tool_call"] && push!(flags, "tools")
+    r.reasoning && push!(flags, "reasoning")
+    r.tool_call && push!(flags, "tools")
     flag_str = isempty(flags) ? "" : " ($(join(flags, ", ")))"
-    push!(lines, "  $(r["id"])$flag_str$ctx_str$cost_str")
+    push!(lines, "  $(r.provider)/$(r.id)$flag_str$ctx_str$cost_str")
   end
-  push!(lines, "", "Use /model <id> to switch")
+  push!(lines, "", "Use /model <provider/id> to switch")
   join(lines, "\n")
 end
 
@@ -80,4 +80,16 @@ function switch_model!(model_id::String)
   end
 end
 
+function complete(prefix)
+  allowed = get(prosca.CONFIG, "providers", nothing)
+  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
+  models = if contains(prefix, '/')
+    parts = split(prefix, '/'; limit=2)
+    prosca.search(string(parts[1]), string(parts[2]); max_results=20, allowed_providers=allowed_ids)
+  else
+    prosca.search(prefix; max_results=20, allowed_providers=allowed_ids)
+  end
+  map(m -> "/model $(m.provider)/$(m.id)", models)
 end
+
+end # end module

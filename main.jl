@@ -1,22 +1,19 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
-@use "github.com/jkroso/LLM.jl" LLM OpenAI Anthropic Google Ollama search search_providers
+@use "github.com/jkroso/LLM.jl" LLM search
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
-@use "github.com/jkroso/LLM.jl/models" get_pricing get_logo
+@use "github.com/jkroso/JSON.jl" parse_json write_json
+@use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
+@use "./repl" interpret TRUSTED_MODULES
+@use "./gateway/mail_auth" MailAuth ensure_token!
+@use "./safety"...
 @use LibGit2
 @use Logging
 @use SQLite
-@use "github.com/jkroso/JSON.jl" parse_json
-@use "github.com/jkroso/JSON.jl/write" json
-@use Dates
-@use HTTP
-@use YAML
-@use UUIDs
 @use Base64
-@use "./safety"...
-@use "./repl" interpret TRUSTED_MODULES
-@use "./gateway/mail_auth" MailAuth ensure_token!
-@use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
+@use Dates
+@use UUIDs
+@use YAML
 
 # ── Constants set at precompile time ─────────────────────────────────
 const HOME = mkpath(home() * "Caesar")
@@ -746,7 +743,7 @@ function _process_message(user_input::String, agent::Agent;
           if m isa AIMessage
             !isempty(m.text) && println(io, m.text)
             for tc in m.tool_calls
-              println(io, "  tool_call: $(tc.name)($(json(tc.arguments)))")
+              println(io, "  tool_call: $(tc.name)($(write_json(tc.arguments)))")
             end
           elseif m isa ToolResultMessage
             println(io, m.content)
@@ -814,7 +811,7 @@ function _process_message(user_input::String, agent::Agent;
         # Check confirmation
         if tc.name in TOOL_CONFIRM && tc.name ∉ auto_allowed
           req_id = rand(UInt64)
-          put!(outbox, ToolCallRequest(tc.name, json(tc.arguments), req_id))
+          put!(outbox, ToolCallRequest(tc.name, write_json(tc.arguments), req_id))
           approval = take!(inbox)
           if approval isa ToolApproval && approval.id == req_id
             if approval.decision == :always
@@ -834,7 +831,7 @@ function _process_message(user_input::String, agent::Agent;
         "Unknown tool '$(tc.name)'"
       end
 
-      put!(outbox, ToolResult(tc.name, json(tc.arguments), result))
+      put!(outbox, ToolResult(tc.name, write_json(tc.arguments), result))
       log_memory("$(tc.name): $(first(result, 500))"; agent_id=agent.id, conversation_id)
       truncated = length(result) > 4000 ? first(result, 4000) * "\n... (truncated)" : result
       push!(messages, ToolResultMessage(tc.id, truncated))
@@ -1029,17 +1026,20 @@ function __init__()
   end
 
   # Trust modules that the agent's skills depend on
-  for mod in [HTTP, Base64]
+  for mod in [Base64]
     push!(TRUSTED_MODULES, mod)
   end
 
 end
 
-# Export everything that json_io.jl and other consumers need
-for n in names(@__MODULE__; all=true)
-  n in (nameof(@__MODULE__), :eval, :include) && continue
-  startswith(string(n), '#') && continue
-  startswith(string(n), '⭒') && continue
-  @eval export $n
-end
+export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
+       MEMORY_PROVIDERS,
+       Agent, AgentDone, AgentMessage, StreamToken, ToolCallRequest, ToolResult,
+       ToolApproval, Envelope, InboundEnvelope, OutboundEnvelope,
+       PresenceRouter,
+       default_agent, create_agent!, delete_agent!, update_agent!,
+       llm_generate, log_memory,
+       route_approval, resolve_approval, check_pending_approvals!,
+       primary_adapter, register_adapter!, channel_symbol, send_message,
+       start!
 
