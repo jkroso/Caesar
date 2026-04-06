@@ -170,7 +170,7 @@ handle(::Val{:generate_title}, msg) = @async begin
     UserMessage(text)
   ]
   title = strip(llm_generate(messages))
-  Dict("type" => "title", "title" => title)
+  Dict{String,Any}("type" => "title", "title" => title)
 end
 
 function handle(::Val{:restore_context}, msg)
