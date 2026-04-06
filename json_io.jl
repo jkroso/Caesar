@@ -6,9 +6,9 @@
 # can filter them from Julia noise.
 # ═══════════════════════════════════════════════════════════════════════
 
-@use "github.com/jkroso/LLM.jl" LLM search_providers
+@use "github.com/jkroso/LLM.jl" LLM
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage Image Audio Document
-@use "github.com/jkroso/LLM.jl/models" get_logo
+@use "github.com/jkroso/LLM.jl/models" get_logo search
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/telegram"...
 @use "./scheduler"...
@@ -126,33 +126,33 @@ end
 
 handle(::Val{:model_search}, msg) = @async begin
   allowed = get(CONFIG, "providers", nothing)
-  ids = allowed isa Vector ? Set(union(string.(allowed), ["ollama"])) : nothing
+  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
   query = string(get(msg, "query", ""))
   results = if contains(query, '/')
     parts = split(query, '/'; limit=2)
-    search(string(parts[1]), string(parts[2]); max_results=100)
+    search(string(parts[1]), string(parts[2]); max_results=100, allowed_providers=allowed_ids)
   else
-    search(query; max_results=100)
+    search(query; max_results=100, allowed_providers=allowed_ids)
   end
-  if ids !== nothing
-    filter!(m -> m["provider"] in ids, results)
-  end
-  unique!(m -> m["provider"] * "/" * m["id"], results)
+  unique!(m -> "$(m.provider)/$(m.id)", results)
   Dict("type" => "model_search_results", "data" => results, "query" => query)
 end
 
 handle(::Val{:providers_list}, msg) = @async begin
   allowed = get(CONFIG, "providers", nothing)
-  ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
-  result = isempty(ids) ? search_providers() : search_providers(ids)
-  data = map(result) do p
-    id = get(p, "id", "")
+  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
+  models = search(""; allowed_providers=allowed_ids, max_results=1000)
+  seen = Set{String}()
+  data = Dict{String,Any}[]
+  for m in models
+    m.provider in seen && continue
+    push!(seen, m.provider)
     logo = try
-      "data:image/svg+xml;base64," * base64encode(read(get_logo(id)))
+      "data:image/svg+xml;base64," * base64encode(read(get_logo(m.provider)))
     catch
       nothing
     end
-    Dict{String,Any}("id" => id, "name" => get(p, "name", ""), "logo" => logo)
+    push!(data, Dict{String,Any}("id" => m.provider, "name" => m.provider, "logo" => logo))
   end
   Dict("type" => "providers", "data" => data)
 end
