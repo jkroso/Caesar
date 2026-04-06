@@ -169,7 +169,7 @@ handle(::Val{:generate_title}, msg) = @async begin
     SystemMessage("Generate a short chat title (3-6 words, no quotes, no punctuation) that summarizes the user's message. Reply with ONLY the title, nothing else."),
     UserMessage(text)
   ]
-  title = strip(llm_generate(messages))
+  title = strip(read(default_agent().llm(messages), String))
   Dict{String,Any}("type" => "title", "title" => title)
 end
 
@@ -333,30 +333,32 @@ function handle(::Val{:routine_create}, msg)
   if !isempty(schedule_natural)
     gen_prompt *= """
 
-Also convert this schedule to a standard 5-field cron expression.
+    Also convert this schedule to a standard 5-field cron expression.
 
-Reply in this exact format (two lines):
-NAME: <short name>
-CRON: <cron expression>
+    Reply in this exact format (two lines):
+    NAME: <short name>
+    CRON: <cron expression>
 
-Examples:
-- "every morning at 8am" → CRON: 0 8 * * *
-- "every 2 hours" → CRON: 0 */2 * * *
-- "weekday mornings at 9" → CRON: 0 9 * * 1-5
+    Examples:
+    - "every morning at 8am" → CRON: 0 8 * * *
+    - "every 2 hours" → CRON: 0 */2 * * *
+    - "weekday mornings at 9" → CRON: 0 9 * * 1-5
 
-Schedule: $schedule_natural"""
+    Schedule: $schedule_natural
+    """
   else
     gen_prompt *= """
 
-Reply in this exact format (one line):
-NAME: <short name>"""
+    Reply in this exact format (one line):
+    NAME: <short name>
+    """
   end
   gen_prompt *= "\n\nPrompt: $prompt"
 
   gen_msgs = [SystemMessage("You generate short names for tasks and convert schedules to cron. Reply only in the requested format."),
               UserMessage(gen_prompt)]
   result = try
-    llm_generate(gen_msgs)
+    read(default_agent().llm(gen_msgs), String)
   catch e
     throw(UserError("Failed to generate routine: $(sprint(showerror, e))"))
   end
@@ -413,7 +415,7 @@ function handle(::Val{:routine_update}, msg)
     if !isempty(sn)
       parse_msgs = [SystemMessage("You convert schedules to cron. Reply with only the cron expression."),
                     UserMessage("Convert to cron: $sn")]
-      cron_str = strip(llm_generate(parse_msgs))
+      cron_str = strip(read(default_agent().llm(parse_msgs), String))
       push!(sets, "schedule_cron=?")
       push!(vals, cron_str)
       next_run = string(next_cron_time_utc(cron_str, now(Dates.UTC)))
@@ -686,8 +688,9 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
               UserMessage(prompt)]
 
   started_at = string(now(Dates.UTC))
+  llm = LLM(model, CONFIG)
   content = try
-    llm_generate(messages; model)
+    read(llm(messages), String)
   catch e
     @error "Routine execution failed" routine_id=routine.id exception=e
     "Error: $(sprint(showerror, e))"
@@ -758,9 +761,10 @@ Review this project and determine if there's anything you can do to help move it
   messages = [SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
               UserMessage(prompt)]
 
+  llm = LLM(model, CONFIG)
   started_at = string(now(Dates.UTC))
   content = try
-    llm_generate(messages; model)
+    read(llm(messages), String)
   catch e
     @error "Project check-in failed" project_id=project.id exception=e
     return

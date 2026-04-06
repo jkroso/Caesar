@@ -281,10 +281,6 @@ function route_notification(router::PresenceRouter, text::String;
   end
 end
 "Send messages to the default LLM and return the full response text"
-function llm_generate(messages::Vector; model::Union{String,Nothing}=nothing)::String
-  llm = LLM(model !== nothing ? model : get(CONFIG, "llm", "ollama:llama3"), CONFIG)
-  read(llm(Message[m for m in messages]), String)
-end
 
 function log_memory(text::String; role::String="Agent", metadata=Dict(),
                     agent_id::String="prosca", conversation_id::Union{String,Nothing}=nothing)
@@ -538,7 +534,7 @@ function create_agent!(name::String, description::String)::Union{Agent, Nothing}
       <instructions.md content: capabilities, constraints, how to approach tasks — bullet points>"""),
       UserMessage("Agent name: $name\nDescription: $description")
     ]
-    result = llm_generate(gen_msgs)
+    result = read(default_agent().llm(gen_msgs), String)
     soul_match = match(r"===SOUL===\s*\n(.*?)===INSTRUCTIONS===\s*\n(.*)"s, result)
     if soul_match !== nothing
       strip(String(soul_match.captures[1])), strip(String(soul_match.captures[2]))
@@ -1038,7 +1034,7 @@ export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
        ToolApproval, Envelope, InboundEnvelope, OutboundEnvelope,
        PresenceRouter,
        default_agent, create_agent!, delete_agent!, update_agent!,
-       llm_generate, log_memory,
+       log_memory,
        route_approval, resolve_approval, check_pending_approvals!,
        primary_adapter, register_adapter!, channel_symbol, send_message,
        start!
