@@ -1,6 +1,7 @@
 @use "github.com/jkroso/URI.jl/FSPath" home FSPath
 @use "github.com/jkroso/Promises.jl" @thread
 @use "github.com/jkroso/LLM.jl" LLM search
+@use Serialization
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
@@ -25,6 +26,48 @@ const DB = Ref{SQLite.DB}()
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
+const MODEL_CACHE_PATH = HOME * "model_cache.bin"
+
+"Save a model info NamedTuple to disk for fast boot"
+function cache_model_info(info::NamedTuple)
+  Serialization.serialize(string(MODEL_CACHE_PATH), info)
+end
+
+"Load a cached model info NamedTuple from disk, or nothing if missing/stale"
+function load_cached_model_info(model::String)::Union{NamedTuple, Nothing}
+  isfile(MODEL_CACHE_PATH) || return nothing
+  info = try Serialization.deserialize(string(MODEL_CACHE_PATH)) catch; return nothing end
+  info isa NamedTuple || return nothing
+  cached_id = "$(info.provider)/$(info.id)"
+  model == cached_id || model == info.id || return nothing
+  info
+end
+
+"Create an LLM, using the disk cache when possible"
+function cached_LLM(model::String, config::Dict)::LLM
+  info = load_cached_model_info(model)
+  if info !== nothing
+    return LLM(info, config)
+  end
+  llm = LLM(model, config)
+  cache_model_info(llm.info)
+  llm
+end
+
+"Ensure a model string has a provider prefix (e.g. 'ollama/gemma4:31b') to avoid slow all-provider scan"
+function ensure_provider_prefix(model::AbstractString)::String
+  s = string(model)
+  contains(s, '/') && return s
+  isempty(s) && return s
+  allowed = get(CONFIG, "providers", nothing)
+  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
+  results = search("", s; max_results=1, allowed_providers=allowed_ids)
+  if isempty(results)
+    return s
+  end
+  cache_model_info(results[1])
+  "$(results[1].provider)/$(results[1].id)"
+end
 
 # Agent → Interface events (per-message outbox)
 struct AgentMessage
@@ -451,7 +494,7 @@ function Agent(id::String, personality::String, instructions::String;
                repl_module::Module=Module(Symbol("agent_$id")),
                repl_log::IOStream=open(string(HOME*"agents"*id*"repl.log"), "w"),
                config::Dict{String, Any}=Dict{String, Any}(),
-               llm::LLM=LLM(get(CONFIG, "llm", "ollama:llama3"), CONFIG),
+               llm::LLM=cached_LLM(get(CONFIG, "llm", "ollama:llama3"), CONFIG),
                history::Vector{Message}=Message[],
                inbox::Channel=Channel(Inf))
   agent = Agent(id, personality, instructions, skills, path, repl_module, repl_log, config, llm, history, inbox)
@@ -1034,6 +1077,7 @@ export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
        ToolApproval, Envelope, InboundEnvelope, OutboundEnvelope,
        PresenceRouter,
        default_agent, create_agent!, delete_agent!, update_agent!,
+       cached_LLM, cache_model_info, ensure_provider_prefix,
        log_memory,
        route_approval, resolve_approval, check_pending_approvals!,
        primary_adapter, register_adapter!, channel_symbol, send_message,

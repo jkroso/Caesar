@@ -38,14 +38,14 @@ function fn(args::AbstractString)::String
   exact = findfirst(r -> r.id == query || "$(r.provider)/$(r.id)" == query, results)
   if exact !== nothing
     r = results[exact]
-    switch_model!(r.id)
+    switch_model!(r)
     return "Switched to $(r.provider)/$(r.id)"
   end
 
   # Single result → switch to it
   if length(results) == 1
     r = results[1]
-    switch_model!(r.id)
+    switch_model!(r)
     return "Switched to $(r.provider)/$(r.id)"
   end
 
@@ -72,11 +72,21 @@ function fn(args::AbstractString)::String
   join(lines, "\n")
 end
 
-function switch_model!(model_id::String)
+function switch_model!(info::NamedTuple)
+  model_id = "$(info.provider)/$(info.id)"
+  prosca.cache_model_info(info)
   prosca.CONFIG["llm"] = model_id
   prosca.YAML.write_file(string(prosca.HOME * "config.yaml"), prosca.CONFIG)
   for (_, agent) in prosca.AGENTS
-    agent.llm = prosca.LLM(model_id, prosca.CONFIG)
+    agent.llm = prosca.LLM(info, prosca.CONFIG)
+  end
+end
+
+function switch_model!(model_id::String)
+  prosca.CONFIG["llm"] = prosca.ensure_provider_prefix(model_id)
+  prosca.YAML.write_file(string(prosca.HOME * "config.yaml"), prosca.CONFIG)
+  for (_, agent) in prosca.AGENTS
+    agent.llm = prosca.cached_LLM(prosca.CONFIG["llm"], prosca.CONFIG)
   end
 end
 

@@ -95,11 +95,14 @@ handle(::Val{:config_get}, msg) = Dict("type" => "config", "data" => CONFIG)
 
 function handle(::Val{:config_set}, msg)
   key, value = string(msg["key"]), msg["value"]
+  if key == "llm"
+    value = ensure_provider_prefix(value)
+  end
   CONFIG[key] = value
   YAML.write_file(string(HOME * "config.yaml"), CONFIG)
   if key == "llm"
     for (_, agent) in AGENTS
-      agent.llm = LLM(string(value), CONFIG)
+      agent.llm = cached_LLM(string(value), CONFIG)
     end
   end
   Dict("type" => "config", "data" => CONFIG)
@@ -222,7 +225,7 @@ end
 function handle(::Val{:project_create}, msg)
   name = string(get(msg, "name", ""))
   path = string(get(msg, "path", ""))
-  model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
+  model = let v = get(msg, "model", nothing); v === nothing ? nothing : ensure_provider_prefix(string(v)) end
   idle_mins = get(msg, "idle_check_mins", 30)
 
   isempty(name) && throw(UserError("Project name required"))
@@ -264,6 +267,8 @@ function handle(::Val{:project_update}, msg)
       push!(sets, "$col=?")
       val = if key == :model && v == ""
         nothing
+      elseif key == :model
+        ensure_provider_prefix(string(v))
       elseif key == :paused
         v == true || v == 1 ? 1 : 0
       else
@@ -323,7 +328,7 @@ function handle(::Val{:routine_create}, msg)
   project_id = string(get(msg, "project_id", ""))
   prompt = string(get(msg, "prompt", ""))
   schedule_natural = string(get(msg, "schedule_natural", ""))
-  model = let v = get(msg, "model", nothing); v === nothing ? nothing : string(v) end
+  model = let v = get(msg, "model", nothing); v === nothing ? nothing : ensure_provider_prefix(string(v)) end
 
   isempty(project_id) && throw(UserError("Project required"))
   isempty(prompt) && throw(UserError("Routine prompt required"))
@@ -403,7 +408,16 @@ function handle(::Val{:routine_update}, msg)
     v = get(msg, key, nothing)
     if v !== nothing
       push!(sets, "$col=?")
-      push!(vals, key == :enabled ? (v ? 1 : 0) : (key == :model && v == "" ? nothing : v))
+      val = if key == :enabled
+        v ? 1 : 0
+      elseif key == :model && v == ""
+        nothing
+      elseif key == :model
+        ensure_provider_prefix(string(v))
+      else
+        v
+      end
+      push!(vals, val)
     end
   end
 
@@ -688,7 +702,7 @@ Execute this task. At the end, on a new line, write either NOTABLE:true or NOTAB
               UserMessage(prompt)]
 
   started_at = string(now(Dates.UTC))
-  llm = LLM(model, CONFIG)
+  llm = cached_LLM(model, CONFIG)
   content = try
     read(llm(messages), String)
   catch e
@@ -761,7 +775,7 @@ Review this project and determine if there's anything you can do to help move it
   messages = [SystemMessage(PERSONALITY * "\n" * INSTRUCTIONS),
               UserMessage(prompt)]
 
-  llm = LLM(model, CONFIG)
+  llm = cached_LLM(model, CONFIG)
   started_at = string(now(Dates.UTC))
   content = try
     read(llm(messages), String)
