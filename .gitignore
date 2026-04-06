@@ -14,3 +14,4 @@ Manifest.toml
 Project.toml
 .dippy
 .grok
+model_cache.bin
