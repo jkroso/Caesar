@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
 import { ChevronDown, Search } from "lucide-react";
-import type { ModelSearchResult, ProviderInfo } from "@/types/sidecar";
+import type { ModelSearchResult } from "@/types/sidecar";
 import { useSidecar } from "@/contexts/SidecarContext";
 import { useSettings } from "@/contexts/SettingsContext";
 
@@ -13,7 +13,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const { call } = useSidecar();
   const { config } = useSettings();
   const [results, setResults] = useState<ModelSearchResult[]>([]);
-  const [providerList, setProviderList] = useState<ProviderInfo[]>([]);
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>("");
@@ -36,7 +35,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
 
   // Fetch providers and initial model list on mount
   useEffect(() => {
-    call({ type: "providers_list" }).then((res) => setProviderList(res.data));
     call({ type: "model_search", query: "" }).then((res) => setResults(res.data));
   }, [call]);
 
@@ -119,8 +117,13 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     }
   };
 
-  // Build provider lookup for logos/names
-  const providerMap = new Map(providerList.map((p) => [p.id, p]));
+  // Build provider lookup for logos from results
+  const providerMap = new Map<string, { logo: string | null }>();
+  for (const r of results) {
+    if (!providerMap.has(r.provider)) {
+      providerMap.set(r.provider, { logo: r.logo });
+    }
+  }
 
   // Collect all available modalities from results
   const allModalities = new Set<string>();
@@ -149,33 +152,17 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
     return true;
   });
 
-  // Group results by provider, maintaining provider order from providerList
-  const providerOrder = providerList.length > 0
-    ? providerList.map((p) => p.id)
-    : [...new Set(filteredResults.map((r) => r.provider))];
-
-  const grouped = providerOrder
-    .map((pid) => {
-      const info = providerMap.get(pid);
-      return {
-        id: pid,
-        name: info?.name || pid,
-        logo: info?.logo || null,
-        models: filteredResults.filter((m) => m.provider === pid),
-      };
-    })
-    .filter((g) => g.models.length > 0);
-
-  // Any providers in results not in providerOrder
-  const knownIds = new Set(providerOrder);
-  for (const r of filteredResults) {
-    if (!knownIds.has(r.provider)) {
-      knownIds.add(r.provider);
+  // Group results by provider, maintaining first-seen order
+  const grouped: { id: string; name: string; logo: string | null; models: ModelSearchResult[] }[] = [];
+  const seenProviders = new Set<string>();
+  for (const m of filteredResults) {
+    if (!seenProviders.has(m.provider)) {
+      seenProviders.add(m.provider);
       grouped.push({
-        id: r.provider,
-        name: r.provider,
-        logo: null,
-        models: filteredResults.filter((m) => m.provider === r.provider),
+        id: m.provider,
+        name: m.provider,
+        logo: providerMap.get(m.provider)?.logo || null,
+        models: filteredResults.filter((r) => r.provider === m.provider),
       });
     }
   }
@@ -194,7 +181,6 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        title={selectedId || "Select model"}
       >
         {!open && selectedLogo ? (
           <img src={selectedLogo} alt={resolvedProvider || ""} className="w-5 h-5 rounded-md bg-white/90 p-0.5" />
@@ -209,11 +195,16 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
             <Search size={12} />
             <input
               ref={searchRef}
-              type="text"
+              type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Search models..."
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              name="model-search-nofill"
               className="appearance-none border-none bg-transparent flex-1 text-xs text-[var(--color-text)] outline-none"
             />
           </div>

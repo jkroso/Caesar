@@ -72,14 +72,14 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
   const deleteConversation = useCallback((id: string) => {
     setConversations((prev) => prev.filter((c) => c.id !== id));
     setActiveId((current) => (current === id ? null : current));
-    call({ type: "conversation_delete", id }).then((res) => applyConversationList(res.data));
+    call({ type: "conversation_delete", conversation_id: id }).then((res) => applyConversationList(res.data));
   }, [call, applyConversationList]);
 
   const renameConversation = useCallback((id: string, title: string) => {
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title, updatedAt: Date.now() } : c))
     );
-    call({ type: "conversation_update_title", id, title }).then((res) => applyConversationList(res.data));
+    call({ type: "conversation_update_title", conversation_id: id, title }).then((res) => applyConversationList(res.data));
   }, [call, applyConversationList]);
 
   const sendRef = useRef(send);
@@ -91,7 +91,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     );
     // Persist to backend DB
     if (messages.length > 0) {
-      sendRef.current({ type: "conversation_save_messages", id, messages });
+      sendRef.current({ type: "conversation_save_messages", conversation_id: id, messages });
     }
   }, []);
 

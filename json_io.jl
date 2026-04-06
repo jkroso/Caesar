@@ -8,7 +8,7 @@
 
 @use "github.com/jkroso/LLM.jl" LLM
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage Image Audio Document
-@use "github.com/jkroso/LLM.jl/models" get_logo search
+@use "github.com/jkroso/LLM.jl/models" search
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/telegram"...
 @use "./scheduler"...
@@ -135,27 +135,20 @@ handle(::Val{:model_search}, msg) = @async begin
     search(query; max_results=100, allowed_providers=allowed_ids)
   end
   unique!(m -> "$(m.provider)/$(m.id)", results)
-  Dict("type" => "model_search_results", "data" => results, "query" => query)
+  data = map(results) do m
+    p = m.pricing
+    cost = (p[1].value == 0 && p[2].value == 0) ? nothing :
+           Dict("input" => round(Float64(p[1].value), digits=2),
+                "output" => round(Float64(p[2].value), digits=2))
+    logo = try "data:image/svg+xml;base64," * base64encode(read(m.logo)) catch; nothing end
+    Dict{String,Any}("id" => m.id, "name" => m.name, "provider" => m.provider,
+                      "reasoning" => m.reasoning, "tool_call" => m.tool_call,
+                      "context" => m.context, "cost" => cost, "logo" => logo,
+                      "modalities" => Dict("input" => m.modalities.input, "output" => m.modalities.output))
+  end
+  Dict("type" => "model_search_results", "data" => data, "query" => query)
 end
 
-handle(::Val{:providers_list}, msg) = @async begin
-  allowed = get(CONFIG, "providers", nothing)
-  allowed_ids = allowed isa Vector ? union(string.(allowed), ["ollama"]) : String[]
-  models = search(""; allowed_providers=allowed_ids, max_results=1000)
-  seen = Set{String}()
-  data = Dict{String,Any}[]
-  for m in models
-    m.provider in seen && continue
-    push!(seen, m.provider)
-    logo = try
-      "data:image/svg+xml;base64," * base64encode(read(get_logo(m.provider)))
-    catch
-      nothing
-    end
-    push!(data, Dict{String,Any}("id" => m.provider, "name" => m.provider, "logo" => logo))
-  end
-  Dict("type" => "providers", "data" => data)
-end
 
 function handle(::Val{:reset}, msg)
   conv_id = let v = get(msg, "conversation_id", nothing); v === nothing ? nothing : string(v) end
@@ -526,7 +519,7 @@ function handle(::Val{:conversations_list}, msg)
 end
 
 function handle(::Val{:conversation_save_messages}, msg)
-  id = string(get(msg, "id", ""))
+  id = string(get(msg, "conversation_id", ""))
   messages = get(msg, "messages", [])
   SQLite.execute(DB[], "UPDATE conversations SET messages=?, updated_at=datetime('now') WHERE id=?",
                  (write_json(messages), id))
@@ -545,14 +538,14 @@ function handle(::Val{:conversation_create}, msg)
 end
 
 function handle(::Val{:conversation_delete}, msg)
-  id = string(get(msg, "id", ""))
+  id = string(get(msg, "conversation_id", ""))
   SQLite.execute(DB[], "DELETE FROM conversations WHERE id=?", (id,))
   delete!(GUI_CONVERSATIONS, id)
   handle(Val(:conversations_list), Dict())
 end
 
 function handle(::Val{:conversation_update_title}, msg)
-  id = string(get(msg, "id", ""))
+  id = string(get(msg, "conversation_id", ""))
   title = string(get(msg, "title", ""))
   SQLite.execute(DB[], "UPDATE conversations SET title=?, updated_at=datetime('now') WHERE id=?", (title, id))
   handle(Val(:conversations_list), Dict())

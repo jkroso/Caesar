@@ -198,9 +198,8 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
                 >
                   <span className="overflow-hidden text-ellipsis whitespace-nowrap flex-1">{conv.title}</span>
                   <button
-                    className="appearance-none border-none bg-transparent cursor-pointer hidden text-[var(--color-text-muted)] p-0.5 group-hover:flex hover:text-[var(--color-error)]"
+                    className="appearance-none border-none bg-transparent cursor-pointer flex text-[var(--color-text-muted)] p-0.5 opacity-0 group-hover:opacity-100 hover:text-[var(--color-error)]"
                     onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id); }}
-                    title="Delete conversation"
                   >
                     <Trash2 size={12} />
                   </button>
