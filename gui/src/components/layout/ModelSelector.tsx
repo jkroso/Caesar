@@ -26,11 +26,18 @@ export default function ModelSelector({ value, onChange, className, dropdownPosi
   const keyboardNavRef = useRef(false);
 
   useEffect(() => {
-    if (value === undefined && config.llm && typeof config.llm === "string") setSelectedId(config.llm);
+    if (value === undefined && config.llm && typeof config.llm === "string") {
+      // Strip provider prefix (e.g. "xai/grok-4" → "grok-4") since search results use bare ids
+      const llm = config.llm;
+      setSelectedId(llm.includes("/") ? llm.split("/").slice(1).join("/") : llm);
+    }
   }, [config.llm, value]);
 
   useEffect(() => {
-    if (value !== undefined) setSelectedId(value || "");
+    if (value !== undefined) {
+      const v = value || "";
+      setSelectedId(v.includes("/") ? v.split("/").slice(1).join("/") : v);
+    }
   }, [value]);
 
   // Fetch providers and initial model list on mount
