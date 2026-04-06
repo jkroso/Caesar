@@ -13,3 +13,4 @@ agents/*/vault/
 Manifest.toml
 Project.toml
 .dippy
+.grok
