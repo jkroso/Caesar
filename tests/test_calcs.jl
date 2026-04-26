@@ -34,4 +34,41 @@ end
   @test occursin("boom", something(s.long, ""))
 end
 
+# Stub interpret and interpret_value before including calcs.jl
+module _StubRepl
+  interpret(mod, code; kwargs...) = (Core.eval(mod, Meta.parseall(code)); "ok")
+  interpret_value(mod, code) = Core.eval(mod, Meta.parseall(code))
+end
+# Provide to calcs.jl via @use stub
+const interpret = _StubRepl.interpret
+const interpret_value = _StubRepl.interpret_value
+
+include(joinpath(@__DIR__, "..", "calcs.jl"))
+
+@testset "snapshot/apply round-trip" begin
+  src = Module(:src_test)
+  Core.eval(src, :(x = 7))
+  Core.eval(src, :(y = "hello"))
+  Core.eval(src, :(z = [1,2,3]))
+
+  snap = snapshot(src)
+  @test Set(keys(snap)) == Set([:x, :y, :z])
+
+  dst = Module(:dst_test)
+  apply!(dst, snap)
+  @test getfield(dst, :x) == 7
+  @test getfield(dst, :y) == "hello"
+  @test getfield(dst, :z) === getfield(src, :z)  # shared reference
+end
+
+@testset "snapshot ignores generated/internal names" begin
+  m = Module(:gen_test)
+  Core.eval(m, :(real = 1))
+  snap = snapshot(m)
+  @test :real in keys(snap)
+  @test !(:eval in keys(snap))
+  @test !(nameof(m) in keys(snap))
+end
+
 println("calc_summary tests passed")
+println("snapshot tests passed")
