@@ -554,6 +554,11 @@ function load_agents!()
   isdir(AGENTS_DIR) || return
   for entry in AGENTS_DIR.children
     isdir(entry) || continue
+    cfg_path = entry * "config.yaml"
+    if isfile(cfg_path)
+      cfg = try YAML.load_file(string(cfg_path)) catch; Dict() end
+      cfg isa Dict && get(cfg, "hidden", false) === true && continue
+    end
     agent = load_agent(entry)
     agent === nothing && continue
     AGENTS[agent.id] = agent
