@@ -43,6 +43,141 @@ end
 const interpret = _StubRepl.interpret
 const interpret_value = _StubRepl.interpret_value
 
+# FSPath stub — must be defined before calcs.jl is included
+import Base: *
+struct FSPath; path::String; end
+*(p::FSPath, s::String) = FSPath(joinpath(p.path, s))
+Base.string(p::FSPath) = p.path
+
+home() = FSPath("/tmp")  # overridden by calcs_dir() in the testset anyway
+
+# JSON stubs — parse_json / write_json used by the CRUD functions in calcs.jl
+function _json_encode(x)
+  io = IOBuffer()
+  _json_write(io, x)
+  String(take!(io))
+end
+function _json_write(io, x::Nothing); write(io, "null"); end
+function _json_write(io, x::Bool); write(io, x ? "true" : "false"); end
+function _json_write(io, x::AbstractString)
+  write(io, "\"")
+  for c in x
+    if c == '"'; write(io, "\\\"")
+    elseif c == '\\'; write(io, "\\\\")
+    elseif c == '\n'; write(io, "\\n")
+    else; write(io, c)
+    end
+  end
+  write(io, "\"")
+end
+function _json_write(io, x::Real); write(io, string(x)); end
+function _json_write(io, x::AbstractVector)
+  write(io, "[")
+  for (i, v) in enumerate(x)
+    i > 1 && write(io, ",")
+    _json_write(io, v)
+  end
+  write(io, "]")
+end
+function _json_write(io, x::AbstractDict)
+  write(io, "{")
+  first = true
+  for (k, v) in x
+    first || write(io, ",")
+    first = false
+    _json_write(io, string(k))
+    write(io, ":")
+    _json_write(io, v)
+  end
+  write(io, "}")
+end
+
+const write_json = _json_encode
+
+function parse_json(s::AbstractString)
+  i = Ref(1)
+  _parse_value(s, i)
+end
+function _skip_ws(s, i)
+  while i[] <= lastindex(s) && isspace(s[i[]])
+    i[] = nextind(s, i[])
+  end
+end
+function _parse_value(s, i)
+  _skip_ws(s, i)
+  c = s[i[]]
+  c == '{' && return _parse_object(s, i)
+  c == '[' && return _parse_array(s, i)
+  c == '"' && return _parse_string(s, i)
+  c == 'n' && (i[] += 4; return nothing)
+  c == 't' && (i[] += 4; return true)
+  c == 'f' && (i[] += 5; return false)
+  return _parse_number(s, i)
+end
+function _parse_object(s, i)
+  i[] = nextind(s, i[])  # skip {
+  out = Dict{String,Any}()
+  _skip_ws(s, i)
+  s[i[]] == '}' && (i[] = nextind(s, i[]); return out)
+  while true
+    _skip_ws(s, i)
+    k = _parse_string(s, i)
+    _skip_ws(s, i)
+    @assert s[i[]] == ':'
+    i[] = nextind(s, i[])
+    v = _parse_value(s, i)
+    out[k] = v
+    _skip_ws(s, i)
+    if s[i[]] == ','; i[] = nextind(s, i[]); continue; end
+    if s[i[]] == '}'; i[] = nextind(s, i[]); return out; end
+  end
+end
+function _parse_array(s, i)
+  i[] = nextind(s, i[])  # skip [
+  out = Any[]
+  _skip_ws(s, i)
+  s[i[]] == ']' && (i[] = nextind(s, i[]); return out)
+  while true
+    push!(out, _parse_value(s, i))
+    _skip_ws(s, i)
+    if s[i[]] == ','; i[] = nextind(s, i[]); continue; end
+    if s[i[]] == ']'; i[] = nextind(s, i[]); return out; end
+  end
+end
+function _parse_string(s, i)
+  @assert s[i[]] == '"'
+  i[] = nextind(s, i[])
+  io = IOBuffer()
+  while s[i[]] != '"'
+    if s[i[]] == '\\'
+      i[] = nextind(s, i[])
+      c = s[i[]]
+      if c == 'n'; write(io, '\n')
+      elseif c == '"'; write(io, '"')
+      elseif c == '\\'; write(io, '\\')
+      else; write(io, c)
+      end
+    else
+      write(io, s[i[]])
+    end
+    i[] = nextind(s, i[])
+  end
+  i[] = nextind(s, i[])
+  String(take!(io))
+end
+function _parse_number(s, i)
+  j = i[]
+  while j <= lastindex(s) && (isdigit(s[j]) || s[j] in "-+.eE")
+    j = nextind(s, j)
+  end
+  num_str = s[i[]:prevind(s, j)]
+  i[] = j
+  return occursin('.', num_str) || occursin('e', num_str) || occursin('E', num_str) ?
+    parse(Float64, num_str) : parse(Int, num_str)
+end
+
+import UUIDs: uuid4
+
 include(joinpath(@__DIR__, "..", "calcs.jl"))
 
 @testset "snapshot/apply round-trip" begin
@@ -72,3 +207,40 @@ end
 
 println("calc_summary tests passed")
 println("snapshot tests passed")
+
+# Override calcs_dir for tests so we don't touch the user's real calcs/
+const _TEST_CALCS_DIR = mktempdir()
+calcs_dir() = FSPath(_TEST_CALCS_DIR)
+
+@testset "calc CRUD round-trip" begin
+  empty!(CALCS)
+  c = create_calc("Holiday budget")
+  @test c.name == "Holiday budget"
+  @test isfile(calc_path(c.id))
+
+  push!(c.paragraphs, Paragraph("The price of a banana is \$3"))
+  c.paragraphs[1].code_template = "banana_price = {{p0}}"
+  push!(c.paragraphs[1].parameters,
+        Parameter("p0", (24, 25), "3"))
+  c.paragraphs[1].last_value_short = "3"
+  save_calc(c)
+
+  empty!(CALCS)  # force reload from disk
+  reloaded = load_calc(c.id)
+  @test reloaded.name == "Holiday budget"
+  @test length(reloaded.paragraphs) == 1
+  @test reloaded.paragraphs[1].code_template == "banana_price = {{p0}}"
+  @test reloaded.paragraphs[1].parameters[1].current_value == "3"
+
+  list = list_calcs()
+  @test length(list) == 1
+  @test list[1]["id"] == c.id
+
+  rename_calc(c.id, "Trip budget")
+  @test load_calc(c.id).name == "Trip budget"
+
+  delete_calc(c.id)
+  @test !isfile(calc_path(c.id))
+end
+
+println("calc CRUD tests passed")
