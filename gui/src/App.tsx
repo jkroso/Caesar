@@ -7,6 +7,7 @@ import { SettingsProvider } from "@/contexts/SettingsContext";
 import { ProjectProvider } from "@/contexts/ProjectContext";
 import { RoutineProvider } from "@/contexts/RoutineContext";
 import { AgentProvider } from "@/contexts/AgentContext";
+import { CalcsProvider } from "@/contexts/CalcsContext";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import ChatPage from "@/pages/ChatPage";
@@ -15,8 +16,9 @@ import SkillsPage from "@/pages/SkillsPage";
 import RoutinesPage from "@/pages/RoutinesPage";
 import SettingsPage from "@/pages/SettingsPage";
 import AgentsPage from "@/pages/AgentsPage";
+import CalcsPage from "@/pages/CalcsPage";
 
-type Page = "chat" | "projects" | "skills" | "routines" | "settings" | "agents";
+type Page = "chat" | "projects" | "skills" | "routines" | "settings" | "agents" | "calcs";
 
 function AppContent() {
   const [page, setPage] = useState<Page>("chat");
@@ -30,6 +32,7 @@ function AppContent() {
     routines: "Routines",
     settings: "Settings",
     agents: "Agents",
+    calcs: "Calcs",
   }[page];
 
   return (
@@ -69,6 +72,7 @@ function AppContent() {
             {page === "routines" && <RoutinesPage />}
             {page === "settings" && <SettingsPage />}
             {page === "agents" && <AgentsPage />}
+            {page === "calcs" && <CalcsPage />}
           </>
         )}
       </div>
@@ -85,7 +89,9 @@ export default function App() {
             <ChatProvider>
               <ProjectProvider>
                 <RoutineProvider>
-                  <AppContent />
+                  <CalcsProvider>
+                    <AppContent />
+                  </CalcsProvider>
                 </RoutineProvider>
               </ProjectProvider>
             </ChatProvider>

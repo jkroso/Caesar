@@ -1,10 +1,11 @@
-import { Plus, MessageSquare, Zap, Clock, Settings, Trash2, FolderOpen, Bot } from "lucide-react";
+import { Plus, MessageSquare, Zap, Clock, Settings, Trash2, FolderOpen, Bot, Calculator } from "lucide-react";
 import { useConversations } from "@/contexts/ConversationContext";
 import { useAgents } from "@/contexts/AgentContext";
 import { useSidecar } from "@/contexts/SidecarContext";
 import { useProjects } from "@/contexts/ProjectContext";
+import CalcsSidebarList from "@/components/calcs/CalcsSidebarList";
 
-type Page = "chat" | "projects" | "skills" | "routines" | "settings" | "agents";
+type Page = "chat" | "projects" | "skills" | "routines" | "settings" | "agents" | "calcs";
 
 interface Props {
   currentPage: Page;
@@ -15,6 +16,7 @@ interface Props {
 const NAV_ITEMS: { page: Page; icon: typeof MessageSquare; label: string }[] = [
   { page: "projects", icon: FolderOpen, label: "Projects" },
   { page: "agents", icon: Bot, label: "Agents" },
+  { page: "calcs", icon: Calculator, label: "Calcs" },
   { page: "skills", icon: Zap, label: "Skills" },
   { page: "routines", icon: Clock, label: "Routines" },
   { page: "settings", icon: Settings, label: "Settings" },
@@ -165,8 +167,15 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
         ))}
       </nav>
 
-      {/* Conversations — grouped by agent */}
-      <div className="flex-1 overflow-y-auto px-2.5 pt-3 border-t border-[var(--color-border)]">
+      {/* Calcs list — when calcs page is active */}
+      {currentPage === "calcs" && (
+        <div className="flex-1 overflow-y-auto pt-3 border-t border-[var(--color-border)]">
+          <CalcsSidebarList onSelect={() => onNavigate("calcs")} />
+        </div>
+      )}
+
+      {/* Conversations — grouped by agent (hidden on calcs page) */}
+      {currentPage !== "calcs" && <div className="flex-1 overflow-y-auto px-2.5 pt-3 border-t border-[var(--color-border)]">
         {sortedAgents.map((agent) => {
           const agentConvs = convsByAgent(agent.id);
           return (
@@ -217,7 +226,7 @@ export default function Sidebar({ currentPage, onNavigate, open }: Props) {
         {sortedAgents.length === 0 && (
           <p className="text-[11px] text-[var(--color-text-muted)] px-2.5 py-1">Loading agents...</p>
         )}
-      </div>
+      </div>}
 
       {/* Status */}
       <div className="px-4 py-3 border-t border-[var(--color-border)] flex items-center gap-2">
