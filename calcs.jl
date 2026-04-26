@@ -408,3 +408,158 @@ function cascade!(c::Calc, from::Int;
   c.mod = new_mod
   save_calc(c)
 end
+
+# ── Translator (custom mini-agent loop) ──────────────────────────────
+
+@use "github.com/jkroso/LLM.jl" LLM
+@use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall
+@use YAML
+
+const _TRANSLATOR = Ref{Union{LLM,Nothing}}(nothing)
+const _TRANSLATOR_PROMPT = Ref{String}("")
+const _TRANSLATOR_CONFIG = Ref{Dict{String,Any}}(Dict{String,Any}())
+
+function load_translator!()
+  agent_dir = home() * "Caesar" * "agents" * "calc"
+  soul_path = string(agent_dir * "soul.md")
+  cfg_path = string(agent_dir * "config.yaml")
+
+  # Read soul if present, else use minimal default
+  _TRANSLATOR_PROMPT[] = isfile(soul_path) ? read(soul_path, String) :
+    "You convert natural language paragraphs into Julia code. Use the eval tool to test, then call record_result."
+
+  # Read config if present, else use defaults
+  cfg = if isfile(cfg_path)
+    raw = try YAML.load_file(cfg_path) catch; Dict() end
+    raw isa Dict ? Dict{String,Any}(raw) : Dict{String,Any}()
+  else
+    Dict{String,Any}()
+  end
+  # Apply baked-in defaults for missing keys
+  get!(cfg, "llm", "claude-haiku-4-5-20251001")
+  get!(cfg, "temperature", 0.0)
+  get!(cfg, "max_steps", 5)
+
+  _TRANSLATOR_CONFIG[] = cfg
+  _TRANSLATOR[] = LLM(string(cfg["llm"]), Dict{String,Any}())
+end
+
+translator()::LLM = _TRANSLATOR[] === nothing ? (load_translator!(); _TRANSLATOR[]) : _TRANSLATOR[]
+
+const _EVAL_TOOL = Tool(
+  "eval",
+  "Evaluate Julia code in the sandbox. Returns the value's string repr or an error message.",
+  Dict("type"=>"object",
+       "properties"=>Dict("code"=>Dict("type"=>"string", "description"=>"Julia code")),
+       "required"=>["code"]))
+
+const _RECORD_TOOL = Tool(
+  "record_result",
+  "Finalize the translation. Emit the code_template (with {{p0}} placeholders) and the list of parameters. Calling this ends your turn.",
+  Dict("type"=>"object",
+       "properties"=>Dict(
+         "code_template"=>Dict("type"=>"string"),
+         "parameters"=>Dict("type"=>"array", "items"=>Dict(
+           "type"=>"object",
+           "properties"=>Dict(
+             "id"=>Dict("type"=>"string"),
+             "text_span"=>Dict("type"=>"array", "items"=>Dict("type"=>"integer"), "minItems"=>2, "maxItems"=>2),
+             "current_value"=>Dict("type"=>"string")),
+           "required"=>["id","text_span","current_value"]))),
+       "required"=>["code_template","parameters"]))
+
+"""
+    translate_paragraph(c::Calc, idx::Int) -> Bool
+
+Run the translator agent for paragraph `idx`. On success, mutates the
+paragraph's `code_template` and `parameters` and returns `true`. The
+sandbox module is allocated and seeded from snapshot `idx-1`.
+"""
+function translate_paragraph(c::Calc, idx::Int)::Bool
+  isempty(c.snapshots) && build_snapshots!(c)
+  sandbox = Module(Symbol("CalcSandbox_$(c.id)_$(rand(UInt32))"))
+  if idx > 1 && length(c.snapshots) >= idx-1
+    apply!(sandbox, c.snapshots[idx-1])
+  end
+
+  para = c.paragraphs[idx]
+  user_msg = _build_translator_input(c, idx)
+
+  messages = Message[
+    SystemMessage(_TRANSLATOR_PROMPT[]),
+    UserMessage(user_msg)]
+
+  cfg = _TRANSLATOR_CONFIG[]
+  max_steps = Int(get(cfg, "max_steps", 5))
+  temperature = Float64(get(cfg, "temperature", 0.0))
+  tools = Tool[_EVAL_TOOL, _RECORD_TOOL]
+
+  for _ in 1:max_steps
+    stream = translator()(messages; temperature, tools)
+    while !eof(stream)
+      readavailable(stream)
+    end
+    tool_calls = stream.tool_calls
+    response_text = ""
+
+    if isempty(tool_calls)
+      return false
+    end
+
+    push!(messages, AIMessage(response_text, tool_calls))
+
+    for tc in tool_calls
+      if tc.name == "record_result"
+        return _apply_record_result!(para, tc.arguments)
+      elseif tc.name == "eval"
+        code = string(get(tc.arguments, "code", ""))
+        result = try
+          v = interpret_value(sandbox, code)
+          first(string(v), 4000)
+        catch e
+          "ERROR: " * sprint(showerror, e)
+        end
+        push!(messages, ToolResultMessage(tc.id, result))
+      else
+        push!(messages, ToolResultMessage(tc.id, "Unknown tool $(tc.name)"))
+      end
+    end
+  end
+  false
+end
+
+function _build_translator_input(c::Calc, idx::Int)::String
+  io = IOBuffer()
+  println(io, "Document context:")
+  for (j, p) in enumerate(c.paragraphs)
+    j == idx && continue
+    code = isempty(p.code_template) ? "" : render_code(p.code_template, p.parameters)
+    result = something(p.last_value_short, "(no result)")
+    println(io, "¶$j  ", repr(p.text))
+    println(io, "      code: ", code)
+    println(io, "      result: ", result)
+  end
+  println(io)
+  println(io, "Translate paragraph $idx:")
+  print(io, repr(c.paragraphs[idx].text))
+  String(take!(io))
+end
+
+function _apply_record_result!(para::Paragraph, args::Dict)::Bool
+  code_template = string(get(args, "code_template", ""))
+  raw_params = get(args, "parameters", [])
+  raw_params isa Vector || return false
+  params = Parameter[]
+  for rp in raw_params
+    rp isa Dict || return false
+    span = get(rp, "text_span", nothing)
+    span isa Vector && length(span) == 2 || return false
+    push!(params, Parameter(
+      string(get(rp, "id", "")),
+      (Int(span[1]), Int(span[2])),
+      string(get(rp, "current_value", ""))))
+  end
+  para.code_template = code_template
+  para.parameters = params
+  true
+end

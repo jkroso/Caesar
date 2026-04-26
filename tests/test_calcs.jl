@@ -178,6 +178,19 @@ end
 
 import UUIDs: uuid4
 
+# LLM / YAML stubs — calcs.jl @use's these but tests don't exercise the LLM path
+struct LLM end
+struct Message end
+struct SystemMessage; text; end
+struct UserMessage; text; end
+struct AIMessage; text; tool_calls; end
+struct ToolResultMessage; id; content; end
+struct Tool; name; description; parameters; end
+struct ToolCall end
+module YAML
+  load_file(_) = Dict()
+end
+
 include(joinpath(@__DIR__, "..", "calcs.jl"))
 
 @testset "snapshot/apply round-trip" begin
@@ -351,3 +364,29 @@ end
 end
 
 println("cascade tests passed")
+
+@testset "_apply_record_result! parses tool args" begin
+  p = Paragraph("hi")
+  ok = _apply_record_result!(p, Dict(
+    "code_template" => "x = {{p0}}",
+    "parameters" => [Dict("id"=>"p0", "text_span"=>[5,6], "current_value"=>"3")]))
+  @test ok
+  @test p.code_template == "x = {{p0}}"
+  @test length(p.parameters) == 1
+  @test p.parameters[1].id == "p0"
+  @test p.parameters[1].text_span == (5, 6)
+end
+
+@testset "_build_translator_input includes prior context" begin
+  empty!(CALCS)
+  c = create_calc("ctx")
+  p1 = Paragraph("first"); p1.code_template = "x = {{p0}}"; push!(p1.parameters, Parameter("p0", (0,0), "1")); p1.last_value_short = "1"
+  p2 = Paragraph("second")
+  push!(c.paragraphs, p1); push!(c.paragraphs, p2)
+  s = _build_translator_input(c, 2)
+  @test occursin("¶1", s)
+  @test occursin("Translate paragraph 2", s)
+  @test !occursin("¶2", s)
+end
+
+println("translator unit tests passed")
