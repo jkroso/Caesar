@@ -5,7 +5,9 @@
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
-@use "./repl" interpret TRUSTED_MODULES
+@use "./repl" interpret interpret_value TRUSTED_MODULES
+@use "./calc_summary"...
+@use "./calcs" load_translator!
 @use "./gateway/mail_auth" MailAuth ensure_token!
 @use "./safety"...
 @use LibGit2
@@ -1032,6 +1034,13 @@ function __init__()
   load_commands!()
   load_skills!()
   load_agents!()
+
+  try
+    load_translator!()
+    @info "Loaded calc translator agent"
+  catch e
+    @warn "Failed to load calc translator agent" exception=e
+  end
 
   # Initialize memory providers per agent
   for (agent_id, agent) in AGENTS
