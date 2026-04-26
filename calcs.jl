@@ -183,3 +183,106 @@ function rename_calc(id::String, name::String)
   c.name = name
   save_calc(c)
 end
+
+# ── Paragraph splitting ──────────────────────────────────────────────
+
+"""
+    split_paragraphs(text::AbstractString) -> Vector{Tuple{String,UnitRange{Int}}}
+
+Split `text` into paragraphs by runs of 2+ newlines. Returns a vector of
+(paragraph_text, char_range) tuples. Char ranges are 1-indexed Char offsets
+into `text`. Empty leading/trailing whitespace is excluded from the ranges.
+"""
+function split_paragraphs(text::AbstractString)
+  out = Tuple{String, UnitRange{Int}}[]
+  isempty(text) && return out
+  i = 1
+  n = lastindex(text)
+  while i <= n
+    while i <= n && text[i] == '\n'
+      i = nextind(text, i)
+    end
+    i > n && break
+    start = i
+    while i <= n
+      if text[i] == '\n' && i < n && text[nextind(text, i)] == '\n'
+        break
+      end
+      i = nextind(text, i)
+    end
+    stop = i > n ? n : prevind(text, i)
+    while stop >= start && text[stop] in (' ', '\t', '\n')
+      stop = prevind(text, stop)
+    end
+    if stop >= start
+      push!(out, (text[start:stop], start:stop))
+    end
+    while i <= n && text[i] == '\n'
+      i = nextind(text, i)
+    end
+  end
+  out
+end
+
+# ── Edit classification ──────────────────────────────────────────────
+
+"""
+    diff_range(old, new) -> Union{Nothing, Tuple{UnitRange{Int}, String}}
+
+Returns nothing if equal. Otherwise (old_range, replacement_text).
+"""
+function diff_range(old::AbstractString, new::AbstractString)
+  old == new && return nothing
+  oi, ni = firstindex(old), firstindex(new)
+  oend, nend = lastindex(old), lastindex(new)
+  while oi <= oend && ni <= nend && old[oi] == new[ni]
+    oi = nextind(old, oi); ni = nextind(new, ni)
+  end
+  oj, nj = oend, nend
+  while oj >= oi && nj >= ni && old[oj] == new[nj]
+    oj = prevind(old, oj); nj = prevind(new, nj)
+  end
+  old_range = oi:oj
+  replacement = nj >= ni ? new[ni:nj] : ""
+  (old_range, replacement)
+end
+
+@enum EditClass UNCHANGED PARAMETER STRUCTURAL
+
+"""
+    classify_edit(old_text, new_text, parameters) -> (EditClass, Union{Nothing, Tuple{Int, String}})
+
+PARAMETER if and only if the diff is a single contiguous edit lying entirely
+within ONE existing parameter span. Returns the parameter index (1-based)
+and the new substring of the entire span.
+"""
+function classify_edit(old_text::AbstractString, new_text::AbstractString,
+                       parameters::Vector{Parameter})
+  d = diff_range(old_text, new_text)
+  d === nothing && return (UNCHANGED, nothing)
+  old_range, replacement = d
+
+  for (i, p) in enumerate(parameters)
+    char_lo = _byte_to_char(old_text, p.text_span[1] + 1)
+    char_hi = _byte_to_char(old_text, p.text_span[2])
+    char_hi < char_lo && continue
+    if first(old_range) >= char_lo && last(old_range) <= char_hi
+      prefix = old_text[char_lo:prevind(old_text, first(old_range))]
+      suffix = old_text[nextind(old_text, last(old_range)):char_hi]
+      new_value = string(prefix, replacement, suffix)
+      return (PARAMETER, (i, new_value))
+    end
+  end
+  (STRUCTURAL, nothing)
+end
+
+"Convert a 1-indexed byte offset into a 1-indexed Char index."
+function _byte_to_char(s::AbstractString, byte_idx::Int)
+  byte_idx <= 0 && return firstindex(s)
+  cur = 1
+  for (ci, _) in enumerate(eachindex(s))
+    cur > byte_idx && return ci - 1
+    cur += ncodeunits(s[ci])
+  end
+  lastindex(s)
+end

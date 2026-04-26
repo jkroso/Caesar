@@ -244,3 +244,39 @@ calcs_dir() = FSPath(_TEST_CALCS_DIR)
 end
 
 println("calc CRUD tests passed")
+
+@testset "split_paragraphs" begin
+  @test split_paragraphs("") == []
+  @test [t for (t, _) in split_paragraphs("hello")] == ["hello"]
+  @test [t for (t, _) in split_paragraphs("a\n\nb")] == ["a", "b"]
+  @test [t for (t, _) in split_paragraphs("a\n\n\n\nb\n\nc")] == ["a", "b", "c"]
+  ps = split_paragraphs("first line\nstill first\n\nsecond")
+  @test ps[1][1] == "first line\nstill first"
+  @test ps[2][1] == "second"
+end
+
+@testset "diff_range" begin
+  @test diff_range("abc", "abc") === nothing
+  rng, rep = diff_range("abc", "axc")
+  @test rng == 2:2 && rep == "x"
+  rng, rep = diff_range("hello", "help")
+  @test rng == 4:5 && rep == "p"
+  rng, rep = diff_range("price is \$3", "price is \$30")
+  @test rep == "0"  # diff is the inserted "0"; classify_edit reconstructs "30"
+end
+
+@testset "classify_edit" begin
+  params = [Parameter("p0", (26, 27), "3")]
+  text = "The price of a banana is \$3"
+  cls, info = classify_edit(text, text, params)
+  @test cls == UNCHANGED
+
+  cls, info = classify_edit(text, "The price of a banana is \$30", params)
+  @test cls == PARAMETER
+  @test info == (1, "30")
+
+  cls, info = classify_edit(text, "The price of a apple is \$3", params)
+  @test cls == STRUCTURAL
+end
+
+println("paragraph splitting + classification tests passed")
