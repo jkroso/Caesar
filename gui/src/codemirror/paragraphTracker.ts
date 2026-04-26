@@ -142,7 +142,7 @@ export function paragraphTracker(opts: ParagraphTrackerOptions): Extension {
 
   // On editor blur, flush every dirty paragraph.
   const blurHandler = EditorView.domEventHandlers({
-    blur(_e, view) {
+    blur(_e, _view) {
       flushAll();
       return false;
     },
