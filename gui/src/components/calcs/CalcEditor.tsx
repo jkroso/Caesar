@@ -10,6 +10,37 @@ import type { ParagraphRange } from "@/codemirror/paragraphTracker";
 import { parameterDecoration, setParameterMap } from "@/codemirror/parameterDecoration";
 import { resultWidgetExtension, setResultWidgetState } from "@/codemirror/resultWidget";
 
+const calcsTheme = EditorView.theme({
+  "&": {
+    backgroundColor: "transparent",
+    color: "var(--color-text)",
+    fontSize: "15px",
+    height: "100%",
+  },
+  ".cm-content": {
+    caretColor: "var(--color-accent, #5a8de8)",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    padding: "16px 0",
+  },
+  "&.cm-focused .cm-cursor": {
+    borderLeftColor: "var(--color-accent, #5a8de8)",
+    borderLeftWidth: "2px",
+  },
+  ".cm-line": {
+    padding: "0 4px",
+    lineHeight: "1.6",
+  },
+  "&.cm-focused": { outline: "none" },
+  ".cm-selectionBackground, ::selection": {
+    backgroundColor: "var(--color-accent-soft, rgba(90,141,232,0.25))",
+  },
+  ".cm-scroller": { fontFamily: "inherit" },
+}, { dark: true });
+
+function newClientParagraphId() {
+  return "para_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
 interface Props {
   calc: Calc;
 }
@@ -38,6 +69,7 @@ export default function CalcEditor({ calc }: Props) {
             { key: "Mod-Enter", run: () => { triggerEvalAtCursor(); return true; } },
           ]),
           markdown(),
+          calcsTheme,
           paragraphTracker({
             onChange: (changes) => {
               const v = viewRef.current!;
@@ -46,10 +78,14 @@ export default function CalcEditor({ calc }: Props) {
                 if (change.type === "deleted") {
                   idMapRef.current.delete(change.paragraph.id);
                 } else {
-                  // For created or edited: associate by index, then update
                   associateByIndex(calc, idMapRef.current, paras);
-                  const serverId = idMapRef.current.get(change.paragraph.id);
-                  if (serverId) updateParagraph(calc.id, serverId, change.paragraph.text);
+                  let serverId = idMapRef.current.get(change.paragraph.id);
+                  if (!serverId) {
+                    // New paragraph: mint a client-side id; server will create-on-missing.
+                    serverId = newClientParagraphId();
+                    idMapRef.current.set(change.paragraph.id, serverId);
+                  }
+                  updateParagraph(calc.id, serverId, change.paragraph.text);
                 }
               }
             },
