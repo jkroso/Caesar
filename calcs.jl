@@ -411,7 +411,7 @@ end
 
 # ── Translator (custom mini-agent loop) ──────────────────────────────
 
-@use "github.com/jkroso/LLM.jl" LLM
+@use "github.com/jkroso/LLM.jl" LLM search
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall
 @use YAML
 
@@ -441,7 +441,19 @@ function load_translator!()
   get!(cfg, "max_steps", 5)
 
   _TRANSLATOR_CONFIG[] = cfg
-  _TRANSLATOR[] = LLM(string(cfg["llm"]), Dict{String,Any}())
+  _TRANSLATOR[] = _build_llm(string(cfg["llm"]))
+end
+
+"Build an LLM instance, resolving the provider via search if no slash is present."
+function _build_llm(model_str::AbstractString)::LLM
+  results = if contains(model_str, '/')
+    parts = split(model_str, '/'; limit=2)
+    search(string(parts[1]), string(parts[2]); max_results=1)
+  else
+    search("", string(model_str); max_results=1)
+  end
+  isempty(results) && error("No model found matching '$model_str'")
+  LLM(results[1], Dict{String,Any}())
 end
 
 translator()::LLM = _TRANSLATOR[] === nothing ? (load_translator!(); _TRANSLATOR[]) : _TRANSLATOR[]
