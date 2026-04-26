@@ -379,7 +379,11 @@ function cascade!(c::Calc, from::Int;
 
   new_mod = fresh_module(c)
   if from > 1
-    apply!(new_mod, c.snapshots[from-1])
+    snap = c.snapshots[from-1]
+    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
+    @warn "cascade applying snapshot" calc_id=c.id from snapshot_idx=from-1 user_bindings=user_keys
+    apply!(new_mod, snap)
+    @warn "cascade post-apply" calc_id=c.id has_sphere_diameter=isdefined(new_mod, :sphere_diameter) names_after=filter(n -> !haskey(_UNITS_BINDINGS[], n) && n !== nameof(new_mod), names(new_mod; all=true))
   end
 
   for i in from:length(c.paragraphs)
