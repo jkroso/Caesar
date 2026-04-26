@@ -346,6 +346,16 @@ end
   @test_throws Exception interpret(mod, "Core.eval(Main, :(1+1))")
 end
 
+@testset "interpret_value returns actual value" begin
+  m = Module(:iv_test)
+  v = interpret_value(m, "x = 42; x + 8")
+  @test v == 50
+  @test v isa Int
+  arr = interpret_value(m, "[1.0, 2.0, 3.0]")
+  @test arr == [1.0, 2.0, 3.0]
+  @test arr isa Vector{Float64}
+end
+
 @testset "interpret — module isolation" begin
   mod1 = Module(:iso1)
   mod2 = Module(:iso2)

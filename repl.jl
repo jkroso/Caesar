@@ -255,4 +255,36 @@ function _check_safety(f, args;
   nothing
 end
 
-export interpret, TRUSTED_MODULES
+"""
+    interpret_value(mod::Module, code::String; kwargs...) -> Any
+
+Like `interpret`, but returns the actual value of the last expression rather
+than its string representation. Used by the Calcs cascade so that `summarize`
+can dispatch on the real Julia type.
+"""
+function interpret_value(mod::Module, code::String;
+                         outbox::Union{Channel,Nothing}=nothing,
+                         inbox::Union{Channel,Nothing}=nothing,
+                         log::Union{IO,Nothing}=nothing)
+  parsed = Meta.parseall(code)
+  stmts = _flatten_toplevel(parsed)
+  assigned = _collect_assigned_vars(stmts)
+  for n in names(mod; all=true)
+    n == nameof(mod) && continue
+    push!(assigned, n)
+  end
+  if !isempty(assigned)
+    stmts = [_inject_globals(s, assigned) for s in stmts]
+  end
+  isempty(stmts) && return nothing
+
+  last_result = nothing
+  for stmt in stmts
+    expr = stmt isa Expr ? stmt : Expr(:block, stmt)
+    frame = Frame(mod, expr)
+    last_result = _step_frame!(frame; outbox, inbox)
+  end
+  last_result
+end
+
+export interpret, interpret_value, TRUSTED_MODULES
