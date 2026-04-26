@@ -5,7 +5,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { useCalcs } from "@/contexts/CalcsContext";
 import type { Calc, CalcParagraph } from "@/types/sidecar";
-import { paragraphTracker, getParagraphs } from "@/codemirror/paragraphTracker";
+import { paragraphTracker, getParagraphs, flushPendingEdits } from "@/codemirror/paragraphTracker";
 import type { ParagraphRange } from "@/codemirror/paragraphTracker";
 import { parameterDecoration, setParameterMap } from "@/codemirror/parameterDecoration";
 import { resultWidgetExtension, setResultWidgetState } from "@/codemirror/resultWidget";
@@ -66,7 +66,7 @@ export default function CalcEditor({ calc }: Props) {
           keymap.of([
             ...defaultKeymap,
             ...historyKeymap,
-            { key: "Mod-Enter", run: () => { triggerEvalAtCursor(); return true; } },
+            { key: "Mod-Enter", run: () => { flushPendingEdits(); triggerEvalAtCursor(); return true; } },
           ]),
           markdown(),
           calcsTheme,

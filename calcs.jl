@@ -409,6 +409,7 @@ function _cascade_locked!(c::Calc, from::Int;
       p.last_value_short = nothing
       p.last_value_long = nothing
       p.last_error = nothing
+      on_result(i, p, Summary("", nothing))   # clears translating spinner client-side
       succeeded = true
     else
       try
