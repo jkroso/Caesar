@@ -55,7 +55,7 @@ function apply!(mod::Module, snap::Dict{Symbol,Any})
   failed = Symbol[]
   for (n, v) in snap
     try
-      Core.eval(mod, :($n = $v))
+      Base.setglobal!(mod, n, v)
     catch e
       push!(failed, n)
       length(failed) <= 3 && @warn "apply! failed for binding" name=n value_type=typeof(v) error=sprint(showerror, e)
