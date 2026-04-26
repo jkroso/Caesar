@@ -290,3 +290,64 @@ println("paragraph splitting + classification tests passed")
 end
 
 println("render_code tests passed")
+
+@testset "cascade replay" begin
+  empty!(CALCS)
+  c = create_calc("test")
+
+  p1 = Paragraph("first")
+  p1.code_template = "x = {{p0}}"
+  push!(p1.parameters, Parameter("p0", (0,0), "10"))
+  push!(c.paragraphs, p1)
+
+  p2 = Paragraph("second")
+  p2.code_template = "y = x + {{p0}}"
+  push!(p2.parameters, Parameter("p0", (0,0), "5"))
+  push!(c.paragraphs, p2)
+
+  cascade!(c, 1)
+  @test c.paragraphs[1].last_value_short == "10"
+  @test c.paragraphs[2].last_value_short == "15"
+
+  c.paragraphs[1].parameters[1].current_value = "20"
+  cascade!(c, 1)
+  @test c.paragraphs[1].last_value_short == "20"
+  @test c.paragraphs[2].last_value_short == "25"
+end
+
+@testset "cascade respects stale-binding invariant" begin
+  empty!(CALCS)
+  c = create_calc("stale")
+  p1 = Paragraph("first")
+  p1.code_template = "removable = 99"
+  push!(c.paragraphs, p1)
+  cascade!(c, 1)
+  @test c.paragraphs[1].last_value_short == "99"
+  @test isdefined(c.mod, :removable)
+
+  c.paragraphs[1].code_template = "kept = 42"
+  c.paragraphs[1].parameters = Parameter[]
+  cascade!(c, 1)
+  @test c.paragraphs[1].last_value_short == "42"
+  @test !isdefined(c.mod, :removable)
+  @test isdefined(c.mod, :kept)
+end
+
+@testset "cascade does not re-run upstream paragraphs" begin
+  empty!(CALCS)
+  c = create_calc("count")
+  Core.eval(Main, :(cascade_counter_n = Ref(0)))
+  p1 = Paragraph("p1")
+  p1.code_template = "(Main.cascade_counter_n[] += 1; Main.cascade_counter_n[])"
+  push!(c.paragraphs, p1)
+  cascade!(c, 1)
+  first_count = c.paragraphs[1].last_value_short
+
+  p2 = Paragraph("p2")
+  p2.code_template = "1 + 1"
+  push!(c.paragraphs, p2)
+  cascade!(c, 2)
+  @test c.paragraphs[1].last_value_short == first_count
+end
+
+println("cascade tests passed")

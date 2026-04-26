@@ -303,3 +303,108 @@ function render_code(template::AbstractString, parameters::Vector{Parameter})::S
     by_id[id]
   end)
 end
+
+# ── Module allocation ────────────────────────────────────────────────
+
+function fresh_module(c::Calc)::Module
+  c.mod_seq += 1
+  Module(Symbol("Calc_$(c.id)_$(c.mod_seq)"))
+end
+
+# ── Snapshot bootstrap (lazy) ────────────────────────────────────────
+
+"""Build snapshots[1..end] from scratch by replaying every paragraph's
+cached code. Called on first cascade after a fresh load from disk."""
+function build_snapshots!(c::Calc)
+  c.mod = fresh_module(c)
+  empty!(c.snapshots)
+  for p in c.paragraphs
+    code = isempty(p.code_template) ? "" : render_code(p.code_template, p.parameters)
+    if !isempty(code)
+      try
+        interpret_value(c.mod, code)
+      catch
+        # Leave the paragraph result as-is; cascade callers handle errors.
+      end
+    end
+    push!(c.snapshots, snapshot(c.mod))
+  end
+end
+
+# ── Cascade replay ───────────────────────────────────────────────────
+
+"""
+    cascade!(c::Calc, from::Int; on_result, on_error, translator)
+
+Rebuild `c.mod` from snapshot `from-1` (or empty if `from == 1`), then
+re-execute paragraphs `from..end` in order. After each paragraph, call
+`on_result(idx, paragraph, summary)` or `on_error(idx, paragraph, msg)`.
+On a paragraph eval error, invoke `translator(c, idx)` (which should
+update the paragraph's code_template/parameters in place) and retry once.
+"""
+function cascade!(c::Calc, from::Int;
+                  on_result=(_,_,_)->nothing,
+                  on_error=(_,_,_)->nothing,
+                  translator=nothing)
+  isempty(c.snapshots) && build_snapshots!(c)
+
+  new_mod = fresh_module(c)
+  if from > 1
+    apply!(new_mod, c.snapshots[from-1])
+  end
+
+  for i in from:length(c.paragraphs)
+    p = c.paragraphs[i]
+    code = isempty(p.code_template) ? "" : render_code(p.code_template, p.parameters)
+    succeeded = false
+    if isempty(code)
+      p.last_value_short = nothing
+      p.last_value_long = nothing
+      p.last_error = nothing
+      succeeded = true
+    else
+      try
+        v = interpret_value(new_mod, code)
+        s = safe_summarize(v)
+        p.last_value_short = s.short
+        p.last_value_long = s.long
+        p.last_error = nothing
+        on_result(i, p, s)
+        succeeded = true
+      catch e
+        msg = sprint(showerror, e)
+        if translator !== nothing && i > from
+          try
+            translator(c, i)
+            new_code = render_code(p.code_template, p.parameters)
+            v = interpret_value(new_mod, new_code)
+            s = safe_summarize(v)
+            p.last_value_short = s.short
+            p.last_value_long = s.long
+            p.last_error = nothing
+            on_result(i, p, s)
+            succeeded = true
+          catch e2
+            p.last_error = sprint(showerror, e2)
+            p.last_value_short = "error"
+            p.last_value_long = nothing
+            on_error(i, p, p.last_error)
+          end
+        else
+          p.last_error = msg
+          p.last_value_short = "error"
+          p.last_value_long = nothing
+          on_error(i, p, msg)
+        end
+      end
+    end
+    if length(c.snapshots) >= i
+      c.snapshots[i] = snapshot(new_mod)
+    else
+      push!(c.snapshots, snapshot(new_mod))
+    end
+  end
+
+  c.mod = new_mod
+  save_calc(c)
+end
