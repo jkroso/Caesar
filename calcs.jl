@@ -513,15 +513,23 @@ function translate_paragraph(c::Calc, idx::Int)::Bool
   temperature = Float64(get(cfg, "temperature", 0.0))
   tools = Tool[_EVAL_TOOL, _RECORD_TOOL]
 
-  for _ in 1:max_steps
-    stream = translator()(messages; temperature, tools)
-    while !eof(stream)
-      readavailable(stream)
+  for step in 1:max_steps
+    stream = try
+      translator()(messages; temperature, tools)
+    catch e
+      @warn "Translator LLM call failed" calc_id=c.id paragraph_idx=idx step exception=(e, catch_backtrace())
+      return false
     end
+    buf = IOBuffer()
+    while !eof(stream)
+      chunk = readavailable(stream)
+      isempty(chunk) || write(buf, chunk)
+    end
+    response_text = String(take!(buf))
     tool_calls = stream.tool_calls
-    response_text = ""
 
     if isempty(tool_calls)
+      @warn "Translator returned text without tool calls" calc_id=c.id paragraph_idx=idx step text=first(response_text, 500)
       return false
     end
 
@@ -529,7 +537,9 @@ function translate_paragraph(c::Calc, idx::Int)::Bool
 
     for tc in tool_calls
       if tc.name == "record_result"
-        return _apply_record_result!(para, tc.arguments)
+        ok = _apply_record_result!(para, tc.arguments)
+        ok || @warn "record_result args failed validation" calc_id=c.id paragraph_idx=idx args=tc.arguments
+        return ok
       elseif tc.name == "eval"
         code = string(get(tc.arguments, "code", ""))
         result = try
@@ -540,10 +550,12 @@ function translate_paragraph(c::Calc, idx::Int)::Bool
         end
         push!(messages, ToolResultMessage(tc.id, result))
       else
+        @warn "Translator called unknown tool" calc_id=c.id paragraph_idx=idx tool=tc.name
         push!(messages, ToolResultMessage(tc.id, "Unknown tool $(tc.name)"))
       end
     end
   end
+  @warn "Translator exhausted max_steps without record_result" calc_id=c.id paragraph_idx=idx max_steps
   false
 end
 
