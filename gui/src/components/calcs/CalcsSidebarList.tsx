@@ -31,7 +31,7 @@ export default function CalcsSidebarList({ onSelect }: Props) {
              onClick={() => { setActive(entry.id); onSelect(); }}>
           <span className="truncate">{entry.name}</span>
           <button
-            onClick={(e) => { e.stopPropagation(); if (confirm(`Delete "${entry.name}"?`)) deleteCalc(entry.id); }}
+            onClick={(e) => { e.stopPropagation(); deleteCalc(entry.id); }}
             className="opacity-0 group-hover:opacity-100 appearance-none bg-transparent border-none cursor-pointer text-[var(--color-text-muted)] hover:text-red-500"
           >
             <Trash2 size={10} />
