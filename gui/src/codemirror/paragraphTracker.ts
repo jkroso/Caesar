@@ -20,20 +20,16 @@ function nextParaId() { return `cm_${++_paraSeq}_${Date.now().toString(36)}`; }
 export function computeParagraphs(doc: string, prior: ParagraphRange[]): ParagraphRange[] {
   const out: ParagraphRange[] = [];
   if (doc.length === 0) return out;
+  // A paragraph is a single non-empty line. Splits on every newline.
   const matches: { start: number; end: number; text: string }[] = [];
   let i = 0;
   while (i < doc.length) {
-    while (i < doc.length && doc[i] === "\n") i++;
-    if (i >= doc.length) break;
+    if (doc[i] === "\n") { i++; continue; }
     const start = i;
-    while (i < doc.length) {
-      if (doc[i] === "\n" && doc[i + 1] === "\n") break;
-      i++;
-    }
+    while (i < doc.length && doc[i] !== "\n") i++;
     let end = i;
-    while (end > start && (doc[end - 1] === "\n" || doc[end - 1] === " " || doc[end - 1] === "\t")) end--;
+    while (end > start && (doc[end - 1] === " " || doc[end - 1] === "\t")) end--;
     if (end > start) matches.push({ start, end, text: doc.slice(start, end) });
-    while (i < doc.length && doc[i] === "\n") i++;
   }
 
   // Reuse ids by ordinal index. New paragraphs at the end get fresh ids.

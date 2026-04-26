@@ -63,10 +63,14 @@ export default function CalcEditor({ calc }: Props) {
         doc: initialDoc,
         extensions: [
           history(),
+          // Bind Mod-Enter BEFORE defaultKeymap so our handler wins over any
+          // default Enter behavior, and `preventDefault: true` stops the
+          // browser from also inserting a newline character.
           keymap.of([
+            { key: "Mod-Enter", preventDefault: true,
+              run: () => { flushPendingEdits(); triggerEvalAtCursor(); return true; } },
             ...defaultKeymap,
             ...historyKeymap,
-            { key: "Mod-Enter", run: () => { flushPendingEdits(); triggerEvalAtCursor(); return true; } },
           ]),
           markdown(),
           calcsTheme,
