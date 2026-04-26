@@ -384,11 +384,16 @@ end
 
 function _cascade_locked!(c::Calc, from::Int;
                           on_result, on_error, translator)
+  @warn "cascade enter" calc_id=c.id from snapshots_len=length(c.snapshots) num_paras=length(c.paragraphs)
   isempty(c.snapshots) && build_snapshots!(c)
 
   new_mod = fresh_module(c)
   if from > 1
-    apply!(new_mod, c.snapshots[from-1])
+    snap = c.snapshots[from-1]
+    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
+    @warn "cascade applying snapshot" calc_id=c.id from snapshot_idx=from-1 user_bindings=user_keys
+    apply!(new_mod, snap)
+    @warn "cascade post-apply" calc_id=c.id has_sphere_diameter=isdefined(new_mod, :sphere_diameter)
   end
 
   for i in from:length(c.paragraphs)
