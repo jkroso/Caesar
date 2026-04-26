@@ -3,8 +3,8 @@
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./repl" interpret interpret_value
 @use "./calc_summary"...
-@use Dates
-@use UUIDs
+@use Dates...
+@use UUIDs...
 
 # ── Module snapshot (cheap binding map; values shared by reference) ──
 

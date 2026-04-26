@@ -1,5 +1,5 @@
 # calc_summary.jl — short/long abbreviations of evaluated values for the Calcs UI
-@use Dates
+@use Dates...
 
 struct Summary
   short::String
