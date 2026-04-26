@@ -52,9 +52,16 @@ end
 
 """Copy every (name, value) in `snap` into the (assumed-fresh) `mod`."""
 function apply!(mod::Module, snap::Dict{Symbol,Any})
+  failed = Symbol[]
   for (n, v) in snap
-    Core.eval(mod, :($n = $v))
+    try
+      Core.eval(mod, :($n = $v))
+    catch e
+      push!(failed, n)
+      length(failed) <= 3 && @warn "apply! failed for binding" name=n value_type=typeof(v) error=sprint(showerror, e)
+    end
   end
+  isempty(failed) || @warn "apply! summary" mod=nameof(mod) total=length(snap) failed_count=length(failed) failed_first=first(failed, 5)
   mod
 end
 
