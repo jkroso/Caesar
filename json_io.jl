@@ -166,6 +166,120 @@ function handle(::Val{:reset}, msg)
   nothing
 end
 
+# ── Calcs handlers ───────────────────────────────────────────────────
+
+@use "./calcs" list_calcs load_calc create_calc delete_calc rename_calc save_calc
+@use "./calcs" Calc Paragraph Parameter calc_to_dict para_to_dict param_to_dict
+@use "./calcs" split_paragraphs classify_edit cascade! translate_paragraph
+@use "./calcs" PARAMETER STRUCTURAL UNCHANGED CALCS
+
+handle(::Val{:calcs_list}, msg) = Dict("type"=>"calcs", "calcs"=>list_calcs())
+
+function handle(::Val{:calc_get}, msg)
+  c = load_calc(string(msg["calc_id"]))
+  Dict("type"=>"calc", "calc"=>calc_to_dict(c))
+end
+
+function handle(::Val{:calc_create}, msg)
+  name = string(get(msg, "name", "Untitled"))
+  c = create_calc(name)
+  Dict("type"=>"calc", "calc"=>calc_to_dict(c))
+end
+
+function handle(::Val{:calc_delete}, msg)
+  delete_calc(string(msg["calc_id"]))
+  Dict("type"=>"ok")
+end
+
+function handle(::Val{:calc_rename}, msg)
+  rename_calc(string(msg["calc_id"]), string(msg["name"]))
+  Dict("type"=>"ok")
+end
+
+function handle(::Val{:calc_update_paragraph}, msg)
+  c = load_calc(string(msg["calc_id"]))
+  pid = string(msg["paragraph_id"])
+  new_text = string(msg["text"])
+  idx = findfirst(p -> p.id == pid, c.paragraphs)
+  if idx === nothing
+    # Auto-create the paragraph for newly-typed paragraphs (client-chosen id).
+    push!(c.paragraphs, Paragraph(pid, new_text, "", Parameter[], nothing, nothing, nothing))
+    idx = length(c.paragraphs)
+    save_calc(c)
+    @async begin
+      emit(Dict("type"=>"calc_translating", "calc_id"=>c.id, "paragraph_id"=>pid))
+      ok = translate_paragraph(c, idx)
+      ok ? _cascade_and_emit(c, idx) :
+        emit(Dict("type"=>"calc_paragraph_error", "calc_id"=>c.id, "paragraph_id"=>pid, "error"=>"translation failed"))
+    end
+    return Dict("type"=>"calc_classification", "classification"=>"created")
+  end
+  para = c.paragraphs[idx]
+  cls, info = classify_edit(para.text, new_text, para.parameters)
+  para.text = new_text
+
+  if cls == UNCHANGED
+    return Dict("type"=>"calc_classification", "classification"=>"unchanged")
+  elseif cls == PARAMETER
+    pi, new_val = info
+    para.parameters[pi].current_value = new_val
+    @async _cascade_and_emit(c, idx)
+    return Dict("type"=>"calc_classification", "classification"=>"parameter")
+  else  # STRUCTURAL
+    @async begin
+      emit(Dict("type"=>"calc_translating", "calc_id"=>c.id, "paragraph_id"=>pid))
+      ok = translate_paragraph(c, idx)
+      if ok
+        _cascade_and_emit(c, idx)
+      else
+        emit(Dict("type"=>"calc_paragraph_error", "calc_id"=>c.id,
+                  "paragraph_id"=>pid, "error"=>"translation failed"))
+      end
+    end
+    return Dict("type"=>"calc_classification", "classification"=>"structural")
+  end
+end
+
+function handle(::Val{:calc_eval_paragraph}, msg)
+  c = load_calc(string(msg["calc_id"]))
+  pid = string(msg["paragraph_id"])
+  idx = findfirst(p -> p.id == pid, c.paragraphs)
+  idx === nothing && return Dict("type"=>"error", "error"=>"unknown paragraph")
+  @async begin
+    emit(Dict("type"=>"calc_translating", "calc_id"=>c.id, "paragraph_id"=>pid))
+    ok = translate_paragraph(c, idx)
+    ok ? _cascade_and_emit(c, idx) :
+      emit(Dict("type"=>"calc_paragraph_error", "calc_id"=>c.id,
+                "paragraph_id"=>pid, "error"=>"translation failed"))
+  end
+  Dict("type"=>"ok")
+end
+
+function handle(::Val{:calc_eval_all}, msg)
+  c = load_calc(string(msg["calc_id"]))
+  @async _cascade_and_emit(c, 1)
+  Dict("type"=>"ok")
+end
+
+function _cascade_and_emit(c::Calc, from::Int)
+  cascade!(c, from;
+    on_result = (i, p, s) -> emit(Dict(
+      "type"=>"calc_paragraph_result",
+      "calc_id"=>c.id, "paragraph_id"=>p.id,
+      "code_template"=>p.code_template,
+      "parameters"=>[param_to_dict(x) for x in p.parameters],
+      "value_short"=>p.last_value_short,
+      "value_long"=>p.last_value_long)),
+    on_error = (i, p, msg) -> emit(Dict(
+      "type"=>"calc_paragraph_error",
+      "calc_id"=>c.id, "paragraph_id"=>p.id, "error"=>msg)),
+    translator = (calc, idx) -> begin
+      emit(Dict("type"=>"calc_translating", "calc_id"=>calc.id,
+                "paragraph_id"=>calc.paragraphs[idx].id))
+      translate_paragraph(calc, idx)
+    end)
+end
+
 handle(::Val{:generate_title}, msg) = @async begin
   text = string(get(msg, "text", ""))
   messages = Message[
