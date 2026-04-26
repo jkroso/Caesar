@@ -5,7 +5,7 @@ import { getParagraphs } from "./paragraphTracker";
 
 export const setParameterMap = StateEffect.define<Map<string, CalcParagraph>>();
 
-const paramMap = StateField.define<Map<string, CalcParagraph>>({
+export const paramMap = StateField.define<Map<string, CalcParagraph>>({
   create() { return new Map(); },
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setParameterMap)) return e.value;
@@ -39,7 +39,7 @@ const paramDecorations = StateField.define<DecorationSet>({
   provide: f => EditorView.decorations.from(f),
 });
 
-function byteToChar(s: string, byteIdx: number): number {
+export function byteToChar(s: string, byteIdx: number): number {
   let bytes = 0;
   for (let i = 0; i < s.length; i++) {
     if (bytes >= byteIdx) return i;

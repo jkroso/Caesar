@@ -21,15 +21,19 @@ export function computeParagraphs(doc: string, prior: ParagraphRange[]): Paragra
   const out: ParagraphRange[] = [];
   if (doc.length === 0) return out;
   // A paragraph is a single non-empty line. Splits on every newline.
+  // The range extends to end-of-line (including trailing whitespace) so
+  // typing a trailing space doesn't push the cursor "out" of the paragraph
+  // and trigger a premature flush. The reported `text` is still trimmed.
   const matches: { start: number; end: number; text: string }[] = [];
   let i = 0;
   while (i < doc.length) {
     if (doc[i] === "\n") { i++; continue; }
     const start = i;
     while (i < doc.length && doc[i] !== "\n") i++;
-    let end = i;
-    while (end > start && (doc[end - 1] === " " || doc[end - 1] === "\t")) end--;
-    if (end > start) matches.push({ start, end, text: doc.slice(start, end) });
+    const lineEnd = i;
+    let textEnd = lineEnd;
+    while (textEnd > start && (doc[textEnd - 1] === " " || doc[textEnd - 1] === "\t")) textEnd--;
+    if (textEnd > start) matches.push({ start, end: lineEnd, text: doc.slice(start, textEnd) });
   }
 
   // Reuse ids by ordinal index. New paragraphs at the end get fresh ids.

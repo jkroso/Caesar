@@ -23,7 +23,7 @@ type Page = "chat" | "projects" | "skills" | "routines" | "settings" | "agents" 
 function AppContent() {
   const [page, setPage] = useState<Page>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const { status } = useSidecar();
+  const { status, restart } = useSidecar();
 
   const pageTitle = {
     chat: "Chat",
@@ -58,10 +58,16 @@ function AppContent() {
           </div>
         )}
         {status === "error" && (
-          <div className="flex flex-col items-center justify-center flex-1 gap-2 text-[var(--color-text-secondary)]">
+          <div className="flex flex-col items-center justify-center flex-1 gap-3 text-[var(--color-text-secondary)]">
             <p className="text-[var(--color-error)] px-4 py-2">
-              Failed to connect to Prosca agent
+              Sidecar disconnected
             </p>
+            <button
+              onClick={() => restart()}
+              className="appearance-none border border-[var(--color-border)] bg-[var(--color-bg-muted)] hover:bg-[var(--color-bg-elevated)] text-sm px-3 py-1.5 rounded-md cursor-pointer text-[var(--color-text)]"
+            >
+              Reconnect
+            </button>
           </div>
         )}
         {status === "ready" && (

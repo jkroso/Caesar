@@ -8,6 +8,7 @@ import type { Calc, CalcParagraph } from "@/types/sidecar";
 import { paragraphTracker, getParagraphs, flushPendingEdits } from "@/codemirror/paragraphTracker";
 import type { ParagraphRange } from "@/codemirror/paragraphTracker";
 import { parameterDecoration, setParameterMap } from "@/codemirror/parameterDecoration";
+import { parameterKeymap } from "@/codemirror/parameterKeymap";
 import { resultWidgetExtension, setResultWidgetState } from "@/codemirror/resultWidget";
 
 const calcsTheme = EditorView.theme({
@@ -55,7 +56,7 @@ export default function CalcEditor({ calc }: Props) {
   useEffect(() => {
     if (!elRef.current) return;
 
-    const initialDoc = calc.paragraphs.map(p => p.text).join("\n\n");
+    const initialDoc = calc.paragraphs.map(p => p.text).join("\n");
 
     const view = new EditorView({
       parent: elRef.current,
@@ -66,6 +67,7 @@ export default function CalcEditor({ calc }: Props) {
           // Bind Mod-Enter BEFORE defaultKeymap so our handler wins over any
           // default Enter behavior, and `preventDefault: true` stops the
           // browser from also inserting a newline character.
+          parameterKeymap(),
           keymap.of([
             { key: "Mod-Enter", preventDefault: true,
               run: () => { flushPendingEdits(); triggerEvalAtCursor(); return true; } },

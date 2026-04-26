@@ -222,7 +222,18 @@ function handle(::Val{:calc_update_paragraph}, msg)
     return Dict{String,Any}("type"=>"calc_classification", "classification"=>"unchanged")
   elseif cls == PARAMETER
     pi, new_val = info
-    para.parameters[pi].current_value = new_val
+    p = para.parameters[pi]
+    old_lo, old_hi = p.text_span
+    new_hi = old_lo + ncodeunits(new_val)
+    delta = new_hi - old_hi
+    p.current_value = new_val
+    p.text_span = (old_lo, new_hi)
+    if delta != 0
+      for j in (pi+1):length(para.parameters)
+        q = para.parameters[j]
+        para.parameters[j].text_span = (q.text_span[1] + delta, q.text_span[2] + delta)
+      end
+    end
     @async _cascade_and_emit(c, idx)
     return Dict{String,Any}("type"=>"calc_classification", "classification"=>"parameter")
   else  # STRUCTURAL

@@ -79,6 +79,10 @@ impl SidecarProcess {
         drop(guard);
         let _ = self.child.kill();
     }
+
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 impl Drop for SidecarProcess {

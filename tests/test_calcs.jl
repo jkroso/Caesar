@@ -400,7 +400,7 @@ end
   push!(c.paragraphs, p1); push!(c.paragraphs, p2)
   s = _build_translator_input(c, 2)
   @test occursin("¶1", s)
-  @test occursin("Translate paragraph 2", s)
+  @test occursin("Translate ONLY paragraph 2", s)
   @test !occursin("¶2", s)
 end
 

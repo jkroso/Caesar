@@ -619,17 +619,21 @@ end
 
 function _build_translator_input(c::Calc, idx::Int)::String
   io = IOBuffer()
-  println(io, "Document context:")
-  for (j, p) in enumerate(c.paragraphs)
-    j == idx && continue
-    code = isempty(p.code_template) ? "" : render_code(p.code_template, p.parameters)
-    result = something(p.last_value_short, "(no result)")
-    println(io, "¶$j  ", repr(p.text))
-    println(io, "      code: ", code)
-    println(io, "      result: ", result)
+  if idx > 1
+    println(io, "Prior paragraphs (already translated — DO NOT re-emit their code):")
+    for j in 1:idx-1
+      p = c.paragraphs[j]
+      code = isempty(p.code_template) ? "" : render_code(p.code_template, p.parameters)
+      result = something(p.last_value_short, "(no result)")
+      println(io, "¶$j  ", repr(p.text))
+      println(io, "      code: ", code)
+      println(io, "      result: ", result)
+    end
+    println(io)
   end
-  println(io)
-  println(io, "Translate paragraph $idx:")
+  println(io, "Translate ONLY paragraph $idx (a single paragraph). ",
+              "Do not write code for any other paragraph, even if you can see it; ",
+              "each paragraph is translated separately.")
   print(io, repr(c.paragraphs[idx].text))
   String(take!(io))
 end

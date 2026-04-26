@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ChevronDown, Code as CodeIcon, Loader2 } from "lucide-react";
 import type { CalcParagraph } from "@/types/sidecar";
+import { highlighter, defaultTheme } from "@/shiki";
 
 interface Props {
   paragraph: CalcParagraph;
@@ -11,6 +12,15 @@ interface Props {
 export default function ResultWidget({ paragraph, renderedCode, translating }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [showCode, setShowCode] = useState(false);
+
+  const codeHtml = useMemo(() => {
+    if (!renderedCode) return "";
+    try {
+      return highlighter.codeToHtml(renderedCode, { lang: "julia", theme: defaultTheme });
+    } catch {
+      return "";
+    }
+  }, [renderedCode]);
 
   if (translating) {
     return (
@@ -63,9 +73,16 @@ export default function ResultWidget({ paragraph, renderedCode, translating }: P
             </pre>
           )}
           {showCode && (
-            <pre className="m-0 p-2 rounded-md bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs font-mono whitespace-pre-wrap shadow-lg">
-              {renderedCode || "(no code)"}
-            </pre>
+            codeHtml ? (
+              <div
+                className="cm-calc-code-block rounded-md border border-[var(--color-border)] text-xs shadow-lg overflow-auto"
+                dangerouslySetInnerHTML={{ __html: codeHtml }}
+              />
+            ) : (
+              <pre className="m-0 p-2 rounded-md bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs font-mono whitespace-pre-wrap shadow-lg">
+                {renderedCode || "(no code)"}
+              </pre>
+            )
           )}
         </div>
       ) : null}

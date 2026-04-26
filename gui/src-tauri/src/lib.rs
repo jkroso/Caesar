@@ -12,8 +12,12 @@ struct AppState {
 #[tauri::command]
 fn start_sidecar(state: State<AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let mut sidecar_guard = state.sidecar.lock().map_err(|e| e.to_string())?;
-    if sidecar_guard.is_some() {
-        return Ok(()); // Already running
+    if let Some(ref mut proc) = *sidecar_guard {
+        if proc.is_alive() {
+            return Ok(());
+        }
+        // Stale handle for a child that already exited — drop and respawn.
+        *sidecar_guard = None;
     }
     let process = SidecarProcess::spawn(&state.prosca_dir, app_handle)?;
     *sidecar_guard = Some(process);
