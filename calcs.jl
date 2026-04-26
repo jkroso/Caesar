@@ -286,3 +286,20 @@ function _byte_to_char(s::AbstractString, byte_idx::Int)
   end
   lastindex(s)
 end
+
+# ── Template rendering ───────────────────────────────────────────────
+
+"""
+    render_code(template::AbstractString, parameters::Vector{Parameter}) -> String
+
+Substitute every `{{pN}}` placeholder in `template` with the corresponding
+parameter's `current_value`. Unknown placeholders raise.
+"""
+function render_code(template::AbstractString, parameters::Vector{Parameter})::String
+  by_id = Dict(p.id => p.current_value for p in parameters)
+  replace(template, r"\{\{([a-zA-Z0-9_]+)\}\}" => s -> begin
+    id = match(r"\{\{([a-zA-Z0-9_]+)\}\}", s).captures[1]
+    haskey(by_id, id) || error("Unknown parameter $id in template")
+    by_id[id]
+  end)
+end

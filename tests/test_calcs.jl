@@ -280,3 +280,13 @@ end
 end
 
 println("paragraph splitting + classification tests passed")
+
+@testset "render_code" begin
+  ps = [Parameter("p0", (0,0), "3"), Parameter("p1", (0,0), "12")]
+  @test render_code("x = {{p0}}", ps) == "x = 3"
+  @test render_code("x = {{p0}} + {{p1}}", ps) == "x = 3 + 12"
+  @test render_code("no params here", Parameter[]) == "no params here"
+  @test_throws ErrorException render_code("x = {{nope}}", ps)
+end
+
+println("render_code tests passed")
