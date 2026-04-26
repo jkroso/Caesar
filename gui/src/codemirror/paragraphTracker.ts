@@ -36,10 +36,14 @@ export function computeParagraphs(doc: string, prior: ParagraphRange[]): Paragra
     while (i < doc.length && doc[i] === "\n") i++;
   }
 
+  // Reuse ids by ordinal index. When text differs at the same index,
+  // that's an "edited" event. New paragraphs at the end get fresh ids.
+  // (More sophisticated diff-based matching deferred until the simple
+  // model causes problems with mid-document insertions.)
   for (let k = 0; k < matches.length; k++) {
     const m = matches[k];
-    const reuse = prior[k] && prior[k].text === m.text ? prior[k].id : nextParaId();
-    out.push({ id: reuse, from: m.start, to: m.end, text: m.text });
+    const id = prior[k] ? prior[k].id : nextParaId();
+    out.push({ id, from: m.start, to: m.end, text: m.text });
   }
   return out;
 }
