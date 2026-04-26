@@ -190,6 +190,21 @@ struct ToolCall end
 module YAML
   load_file(_) = Dict()
 end
+search(provider::AbstractString, model::AbstractString; kwargs...) = []
+search(query::AbstractString=""; kwargs...) = []
+
+# Fake Units / Imperial modules so _seed_with_units! has something to walk
+module Units
+  struct FakeMeter; v::Float64; end
+  Base.show(io::IO, x::FakeMeter) = print(io, x.v, "m")
+  const m = FakeMeter
+  Base.:*(s::Real, ::Type{FakeMeter}) = FakeMeter(s)
+  Base.:*(a::FakeMeter, b::FakeMeter) = FakeMeter(a.v * b.v)
+  Base.:*(s::Real, a::FakeMeter) = FakeMeter(s * a.v)
+  Base.:/(a::FakeMeter, b::Real) = FakeMeter(a.v / b)
+  Base.:^(a::FakeMeter, n::Integer) = FakeMeter(a.v ^ n)
+end
+module Imperial end
 
 include(joinpath(@__DIR__, "..", "calcs.jl"))
 
@@ -390,3 +405,85 @@ end
 end
 
 println("translator unit tests passed")
+
+@testset "apply! puts bindings into a fresh module (Julia 1.11+ globals)" begin
+  m = Module(:test_apply_bindings)
+  apply!(m, Dict{Symbol,Any}(:foo => 42, :bar => "hello", :baz => [1,2,3]))
+  @test isdefined(m, :foo)
+  @test getfield(m, :foo) == 42
+  @test isdefined(m, :bar)
+  @test getfield(m, :bar) == "hello"
+  @test isdefined(m, :baz)
+  @test getfield(m, :baz) == [1,2,3]
+end
+
+@testset "apply! tolerates UnionAll (Type) values" begin
+  m = Module(:test_apply_types)
+  apply!(m, Dict{Symbol,Any}(:MyType => Vector{Int}))
+  @test isdefined(m, :MyType)
+  @test getfield(m, :MyType) === Vector{Int}
+end
+
+# ── End-to-end scenario: drive the calc lifecycle via RPC-style calls ──
+#
+# This mirrors what the GUI does over the JSON-RPC protocol when the user
+# types two related paragraphs. We bypass json_io.jl's dispatcher (its full
+# dependency graph is heavy for tests) and call the underlying functions
+# directly in the same order: create_calc, then for each paragraph:
+#   1. push paragraph stub (mirrors create-on-missing in calc_update_paragraph)
+#   2. translate_paragraph (stubbed deterministic translator)
+#   3. cascade!
+# We then assert paragraph 2 picked up paragraph 1's binding.
+
+@testset "scenario: RPC-driven cross-paragraph reference" begin
+  empty!(CALCS)
+
+  # Stub translator: deterministic, no LLM. Simulates what the real
+  # translator would emit for each paragraph's text.
+  function fake_translate!(c::Calc, idx::Int)::Bool
+    para = c.paragraphs[idx]
+    text = lowercase(para.text)
+    if occursin("define", text)
+      para.code_template = "my_value = {{p0}}"
+      para.parameters = [Parameter("p0", (0,0), "42")]
+      return true
+    elseif occursin("double", text)
+      para.code_template = "doubled = my_value * {{p0}}"
+      para.parameters = [Parameter("p0", (0,0), "2")]
+      return true
+    end
+    false
+  end
+
+  # Cascade helper that uses our fake translator on retranslate
+  do_cascade!(c, idx) = cascade!(c, idx;
+    translator = (calc, i) -> fake_translate!(calc, i))
+
+  # RPC: calc_create
+  c = create_calc("scenario test")
+
+  # RPC: calc_update_paragraph #1 (create-on-missing path)
+  push!(c.paragraphs, Paragraph("p1", "Define a value", "", Parameter[], nothing, nothing, nothing))
+  @test fake_translate!(c, 1)
+  do_cascade!(c, 1)
+  @test c.paragraphs[1].last_error === nothing
+  @test c.paragraphs[1].last_value_short == "42"
+
+  # RPC: calc_update_paragraph #2 (also create-on-missing)
+  push!(c.paragraphs, Paragraph("p2", "Double it", "", Parameter[], nothing, nothing, nothing))
+  @test fake_translate!(c, 2)
+  do_cascade!(c, 2)
+  @test c.paragraphs[2].last_error === nothing
+  @test c.paragraphs[2].last_value_short == "84"
+
+  # RPC: edit paragraph 1's parameter (parameter-only edit, no retranslation)
+  c.paragraphs[1].parameters[1].current_value = "10"
+  do_cascade!(c, 1)
+  @test c.paragraphs[1].last_value_short == "10"
+  @test c.paragraphs[2].last_value_short == "20"  # cascade re-ran paragraph 2
+
+  # RPC: calc_delete cleanup
+  delete_calc(c.id)
+end
+
+println("scenario + apply! invariant tests passed")

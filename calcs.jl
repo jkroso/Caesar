@@ -35,17 +35,23 @@ end
 
 # ── Module snapshot (cheap binding map; values shared by reference) ──
 
-"""Capture every user-visible binding in `mod` as a Dict{Symbol, Any}."""
+"""Capture every user-visible binding in `mod` as a Dict{Symbol, Any}.
+
+Wraps every introspection call in `@invokelatest` because Julia 1.11+
+caches `names()`, `isdefined()`, and `getfield()` at the call site's
+world age. After we mutate `mod` via `Core.eval(mod, ...)` from outside
+the module, those caches don't reflect the new bindings within the
+same call frame — invokelatest forces a fresh lookup."""
 function snapshot(mod::Module)::Dict{Symbol,Any}
   d = Dict{Symbol,Any}()
-  for n in names(mod; all=true)
+  for n in Base.@invokelatest(names(mod; all=true))
     n === nameof(mod) && continue
-    isdefined(mod, n) || continue
+    Base.@invokelatest(isdefined(mod, n)) || continue
     s = string(n)
     startswith(s, "#") && continue        # generated names
     startswith(s, "include") && continue  # module's own include
     n === :eval && continue               # module's own eval
-    d[n] = getfield(mod, n)
+    d[n] = Base.@invokelatest(getfield(mod, n))
   end
   d
 end
@@ -343,7 +349,6 @@ function fresh_module(c::Calc)::Module
   c.mod_seq += 1
   m = Module(Symbol("Calc_$(c.id)_$(c.mod_seq)"))
   _seed_with_units!(m)
-  @warn "fresh_module seeded" calc_id=c.id mod_seq=c.mod_seq units_binding_count=length(_UNITS_BINDINGS[]) post_seed_names=length(names(m; all=true))
   m
 end
 
@@ -389,16 +394,11 @@ end
 
 function _cascade_locked!(c::Calc, from::Int;
                           on_result, on_error, translator)
-  @warn "cascade enter" calc_id=c.id from snapshots_len=length(c.snapshots) num_paras=length(c.paragraphs)
   isempty(c.snapshots) && build_snapshots!(c)
 
   new_mod = fresh_module(c)
   if from > 1
-    snap = c.snapshots[from-1]
-    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
-    @warn "cascade applying snapshot" calc_id=c.id from snapshot_idx=from-1 user_bindings=user_keys
-    apply!(new_mod, snap)
-    @warn "cascade post-apply" calc_id=c.id has_sphere_diameter=isdefined(new_mod, :sphere_diameter)
+    apply!(new_mod, c.snapshots[from-1])
   end
 
   for i in from:length(c.paragraphs)
@@ -446,13 +446,10 @@ function _cascade_locked!(c::Calc, from::Int;
         end
       end
     end
-    snap = snapshot(new_mod)
-    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
-    @warn "cascade snapshot captured" calc_id=c.id i user_keys snap_total=length(snap)
     if length(c.snapshots) >= i
-      c.snapshots[i] = snap
+      c.snapshots[i] = snapshot(new_mod)
     else
-      push!(c.snapshots, snap)
+      push!(c.snapshots, snapshot(new_mod))
     end
   end
 
