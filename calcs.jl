@@ -8,20 +8,28 @@
 @use Dates...
 @use UUIDs...
 
-# Inject Units + Imperial exports into a fresh module so the agent can write
-# things like `1m`, `9.81m/s^2`, `5kg`, `1L`, `12in`, etc. without imports.
-function _seed_with_units!(mod::Module)
+# Inject Units + Imperial bindings into a fresh module so the agent can
+# write `1m`, `9.81m/s^2`, `5kg`, `1L`, `12inch`, etc. without imports.
+# We use snapshot() because Units doesn't export explicit names — we want
+# every public binding regardless of whether it has an `export` statement.
+const _UNITS_BINDINGS = Ref{Dict{Symbol,Any}}(Dict{Symbol,Any}())
+const _UNITS_SEEDED = Ref{Bool}(false)
+
+function _ensure_units_loaded!()
+  _UNITS_SEEDED[] && return
+  merged = Dict{Symbol,Any}()
   for src in (Units, Imperial)
-    for n in names(src; all=false)
-      n === nameof(src) && continue
-      isdefined(src, n) || continue
-      try
-        Core.eval(mod, :($n = $(getfield(src, n))))
-      catch
-        # Some names may fail to bind (reserved words, etc); skip silently.
-      end
+    for (k, v) in snapshot(src)
+      merged[k] = v
     end
   end
+  _UNITS_BINDINGS[] = merged
+  _UNITS_SEEDED[] = true
+end
+
+function _seed_with_units!(mod::Module)
+  _ensure_units_loaded!()
+  apply!(mod, _UNITS_BINDINGS[])
   mod
 end
 
