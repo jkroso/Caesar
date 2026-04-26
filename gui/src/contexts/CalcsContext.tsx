@@ -36,8 +36,24 @@ function reducer(state: State, action: Action): State {
           ...state.calcs,
           [action.calcId]: {
             ...calc,
-            paragraphs: calc.paragraphs.map(p =>
-              p.id === action.paragraphId ? { ...p, ...action.patch } : p),
+            paragraphs: (() => {
+              const idx = calc.paragraphs.findIndex(p => p.id === action.paragraphId);
+              if (idx >= 0) {
+                return calc.paragraphs.map(p =>
+                  p.id === action.paragraphId ? { ...p, ...action.patch } : p);
+              }
+              // Server-created paragraph the client hasn't seen yet — append it.
+              const seed: CalcParagraph = {
+                id: action.paragraphId,
+                text: "",
+                code_template: "",
+                parameters: [],
+                last_value_short: null,
+                last_value_long: null,
+                last_error: null,
+              };
+              return [...calc.paragraphs, { ...seed, ...action.patch }];
+            })(),
           },
         },
       };
