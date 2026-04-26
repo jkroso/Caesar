@@ -5,7 +5,6 @@ config.yaml
 .superpowers/
 personal
 browser-data/
-Project.toml
 agents/*/login/
 agents/*/last_prompt.md
 agents/*/last_response.txt
@@ -15,3 +14,4 @@ Project.toml
 .dippy
 .grok
 model_cache.bin
+calcs/
