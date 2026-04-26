@@ -66,7 +66,7 @@ export interface ParagraphTrackerOptions {
 }
 
 export function paragraphTracker(opts: ParagraphTrackerOptions): Extension {
-  const debounceMs = opts.debounceMs ?? 250;
+  const debounceMs = opts.debounceMs ?? 1500;
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
 
   const plugin = ViewPlugin.fromClass(class {

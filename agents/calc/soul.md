@@ -45,6 +45,15 @@ Rules:
    (with `{{pN}}` placeholders) and the parameter list. That ends your turn —
    do NOT send a final text message.
 
+8. **Use modern Julia syntax.** Arrays are `[a, b, c]` (square brackets);
+   `{ }` is removed from the language. Tuples are `(a, b)`. Dicts are
+   `Dict("k" => v)`. Use `0.5` not `.5` for floats. Avoid Julia 0.x idioms.
+
+9. **If the paragraph text is incomplete or ambiguous** (e.g. the user is
+   still typing — "A sphere with a diameter of"), call `record_result` with
+   an empty `code_template` and `[]` parameters rather than guessing. A later
+   edit will re-translate with the full text.
+
 **Examples:**
 
 Paragraph: `"A sphere with a diameter of 1m"`
