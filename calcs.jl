@@ -441,10 +441,13 @@ function _cascade_locked!(c::Calc, from::Int;
         end
       end
     end
+    snap = snapshot(new_mod)
+    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
+    @warn "cascade snapshot captured" calc_id=c.id i user_keys snap_total=length(snap)
     if length(c.snapshots) >= i
-      c.snapshots[i] = snapshot(new_mod)
+      c.snapshots[i] = snap
     else
-      push!(c.snapshots, snapshot(new_mod))
+      push!(c.snapshots, snap)
     end
   end
 
