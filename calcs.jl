@@ -92,10 +92,11 @@ mutable struct Calc
   mod::Union{Module,Nothing}                 # current live module, or nothing if not yet built
   snapshots::Vector{Dict{Symbol,Any}}        # one per paragraph; populated lazily
   mod_seq::Int                               # bumps each cascade so module names don't collide
+  lock::ReentrantLock                        # serializes translate + cascade per calc
 end
 
 Calc(id::String, name::String) = Calc(
-  id, name, now(UTC), now(UTC), Paragraph[], nothing, Dict{Symbol,Any}[], 0)
+  id, name, now(UTC), now(UTC), Paragraph[], nothing, Dict{Symbol,Any}[], 0, ReentrantLock())
 
 Paragraph(text::String="") = Paragraph(
   "para_" * string(uuid4())[1:8], text, "", Parameter[], nothing, nothing, nothing)
@@ -146,7 +147,8 @@ function calc_from_dict(d)::Calc
     [para_from_dict(p) for p in get(d, "paragraphs", [])],
     nothing,
     Dict{Symbol,Any}[],
-    0)
+    0,
+    ReentrantLock())
 end
 
 # ── CRUD ─────────────────────────────────────────────────────────────
@@ -375,15 +377,18 @@ function cascade!(c::Calc, from::Int;
                   on_result=(_,_,_)->nothing,
                   on_error=(_,_,_)->nothing,
                   translator=nothing)
+  lock(c.lock) do
+    _cascade_locked!(c, from; on_result, on_error, translator)
+  end
+end
+
+function _cascade_locked!(c::Calc, from::Int;
+                          on_result, on_error, translator)
   isempty(c.snapshots) && build_snapshots!(c)
 
   new_mod = fresh_module(c)
   if from > 1
-    snap = c.snapshots[from-1]
-    user_keys = filter(k -> !haskey(_UNITS_BINDINGS[], k), collect(keys(snap)))
-    @warn "cascade applying snapshot" calc_id=c.id from snapshot_idx=from-1 user_bindings=user_keys
-    apply!(new_mod, snap)
-    @warn "cascade post-apply" calc_id=c.id has_sphere_diameter=isdefined(new_mod, :sphere_diameter) names_after=filter(n -> !haskey(_UNITS_BINDINGS[], n) && n !== nameof(new_mod), names(new_mod; all=true))
+    apply!(new_mod, c.snapshots[from-1])
   end
 
   for i in from:length(c.paragraphs)
@@ -528,6 +533,12 @@ paragraph's `code_template` and `parameters` and returns `true`. The
 sandbox module is allocated and seeded from snapshot `idx-1`.
 """
 function translate_paragraph(c::Calc, idx::Int)::Bool
+  lock(c.lock) do
+    _translate_paragraph_locked(c, idx)
+  end
+end
+
+function _translate_paragraph_locked(c::Calc, idx::Int)::Bool
   isempty(c.snapshots) && build_snapshots!(c)
   sandbox = Module(Symbol("CalcSandbox_$(c.id)_$(rand(UInt32))"))
   _seed_with_units!(sandbox)
