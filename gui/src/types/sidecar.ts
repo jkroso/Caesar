@@ -25,7 +25,73 @@ export type SidecarEvent =
   | { type: "notification"; text: string; project_id?: string; routine_id?: string }
   | { type: "unseen_count"; count: number }
   | { type: "agents"; data: AgentInfo[] }
-  | { type: "conversations"; data: ConversationInfo[] };
+  | { type: "conversations"; data: ConversationInfo[] }
+  | CalcsListEvent
+  | CalcGetEvent
+  | CalcParagraphResultEvent
+  | CalcParagraphErrorEvent
+  | CalcTranslatingEvent
+  | CalcClassificationEvent;
+
+// ── Calcs ─────────────────────────────────────────────────────────────
+
+export interface CalcParameter {
+  id: string;
+  text_span: [number, number];
+  current_value: string;
+}
+
+export interface CalcParagraph {
+  id: string;
+  text: string;
+  code_template: string;
+  parameters: CalcParameter[];
+  last_value_short: string | null;
+  last_value_long: string | null;
+  last_error: string | null;
+}
+
+export interface Calc {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  paragraphs: CalcParagraph[];
+}
+
+export interface CalcIndexEntry {
+  id: string;
+  name: string;
+  updated_at: string;
+}
+
+export interface CalcsListEvent  { type: "calcs"; calcs: CalcIndexEntry[]; id?: string }
+export interface CalcGetEvent    { type: "calc"; calc: Calc; id?: string }
+export interface CalcParagraphResultEvent {
+  type: "calc_paragraph_result";
+  calc_id: string;
+  paragraph_id: string;
+  code_template: string;
+  parameters: CalcParameter[];
+  value_short: string | null;
+  value_long: string | null;
+}
+export interface CalcParagraphErrorEvent {
+  type: "calc_paragraph_error";
+  calc_id: string;
+  paragraph_id: string;
+  error: string;
+}
+export interface CalcTranslatingEvent {
+  type: "calc_translating";
+  calc_id: string;
+  paragraph_id: string;
+}
+export interface CalcClassificationEvent {
+  type: "calc_classification";
+  classification: "unchanged" | "parameter" | "structural" | "created";
+  id?: string;
+}
 
 export interface McpServerInfo {
   url: string;
