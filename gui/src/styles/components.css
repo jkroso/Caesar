@@ -1,0 +1,4 @@
+.cm-calc-parameter {
+  border-bottom: 1px dotted var(--color-accent, #5a8de8);
+  cursor: ew-resize;
+}
