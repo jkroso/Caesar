@@ -339,6 +339,7 @@ function fresh_module(c::Calc)::Module
   c.mod_seq += 1
   m = Module(Symbol("Calc_$(c.id)_$(c.mod_seq)"))
   _seed_with_units!(m)
+  @warn "fresh_module seeded" calc_id=c.id mod_seq=c.mod_seq units_binding_count=length(_UNITS_BINDINGS[]) post_seed_names=length(names(m; all=true))
   m
 end
 
