@@ -536,6 +536,7 @@ function translate_paragraph(c::Calc, idx::Int)::Bool
     push!(messages, AIMessage(response_text, tool_calls))
 
     for tc in tool_calls
+      @info "Translator tool call" calc_id=c.id paragraph_idx=idx step tool=tc.name args=tc.arguments
       if tc.name == "record_result"
         ok = _apply_record_result!(para, tc.arguments)
         ok || @warn "record_result args failed validation" calc_id=c.id paragraph_idx=idx args=tc.arguments
@@ -548,6 +549,7 @@ function translate_paragraph(c::Calc, idx::Int)::Bool
         catch e
           "ERROR: " * sprint(showerror, e)
         end
+        @info "Translator eval result" result=first(result, 200)
         push!(messages, ToolResultMessage(tc.id, result))
       else
         @warn "Translator called unknown tool" calc_id=c.id paragraph_idx=idx tool=tc.name
