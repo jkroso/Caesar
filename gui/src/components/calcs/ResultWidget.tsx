@@ -37,7 +37,7 @@ export default function ResultWidget({ paragraph, renderedCode, translating }: P
   const canExpand = paragraph.last_value_long != null;
 
   return (
-    <span className="inline-block ml-2 align-baseline">
+    <span className="relative inline-block ml-2 align-baseline">
       <span
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--color-bg-muted)] text-xs text-[var(--color-text-secondary)] cursor-pointer hover:bg-[var(--color-bg-elevated)]"
         onClick={() => canExpand && setExpanded(!expanded)}
@@ -52,16 +52,23 @@ export default function ResultWidget({ paragraph, renderedCode, translating }: P
           <CodeIcon size={10} />
         </button>
       </span>
-      {expanded && paragraph.last_value_long && (
-        <pre className="mt-1 p-2 rounded-md bg-[var(--color-bg-muted)] text-xs font-mono whitespace-pre-wrap overflow-auto max-h-64">
-          {paragraph.last_value_long}
-        </pre>
-      )}
-      {showCode && (
-        <pre className="mt-1 p-2 rounded-md bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs font-mono whitespace-pre-wrap">
-          {renderedCode || "(no code)"}
-        </pre>
-      )}
+      {(expanded && paragraph.last_value_long) || showCode ? (
+        <div
+          className="absolute left-0 top-full z-20 mt-1 flex flex-col gap-1 min-w-[16rem] max-w-[40rem]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {expanded && paragraph.last_value_long && (
+            <pre className="m-0 p-2 rounded-md bg-[var(--color-bg-muted)] border border-[var(--color-border)] text-xs font-mono whitespace-pre-wrap overflow-auto max-h-64 shadow-lg">
+              {paragraph.last_value_long}
+            </pre>
+          )}
+          {showCode && (
+            <pre className="m-0 p-2 rounded-md bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-xs font-mono whitespace-pre-wrap shadow-lg">
+              {renderedCode || "(no code)"}
+            </pre>
+          )}
+        </div>
+      ) : null}
     </span>
   );
 }
