@@ -3,8 +3,27 @@
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./repl" interpret interpret_value
 @use "./calc_summary" Summary summarize safe_summarize
+@use "github.com/jkroso/Units.jl" Units
+@use "github.com/jkroso/Units.jl/Imperial" Imperial
 @use Dates...
 @use UUIDs...
+
+# Inject Units + Imperial exports into a fresh module so the agent can write
+# things like `1m`, `9.81m/s^2`, `5kg`, `1L`, `12in`, etc. without imports.
+function _seed_with_units!(mod::Module)
+  for src in (Units, Imperial)
+    for n in names(src; all=false)
+      n === nameof(src) && continue
+      isdefined(src, n) || continue
+      try
+        Core.eval(mod, :($n = $(getfield(src, n))))
+      catch
+        # Some names may fail to bind (reserved words, etc); skip silently.
+      end
+    end
+  end
+  mod
+end
 
 # ── Module snapshot (cheap binding map; values shared by reference) ──
 
@@ -308,7 +327,9 @@ end
 
 function fresh_module(c::Calc)::Module
   c.mod_seq += 1
-  Module(Symbol("Calc_$(c.id)_$(c.mod_seq)"))
+  m = Module(Symbol("Calc_$(c.id)_$(c.mod_seq)"))
+  _seed_with_units!(m)
+  m
 end
 
 # ── Snapshot bootstrap (lazy) ────────────────────────────────────────
@@ -497,6 +518,7 @@ sandbox module is allocated and seeded from snapshot `idx-1`.
 function translate_paragraph(c::Calc, idx::Int)::Bool
   isempty(c.snapshots) && build_snapshots!(c)
   sandbox = Module(Symbol("CalcSandbox_$(c.id)_$(rand(UInt32))"))
+  _seed_with_units!(sandbox)
   if idx > 1 && length(c.snapshots) >= idx-1
     apply!(sandbox, c.snapshots[idx-1])
   end

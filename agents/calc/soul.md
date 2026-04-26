@@ -14,6 +14,17 @@ Rules:
    computation is explicitly requested. Later paragraphs will reference it.
    Only emit an empty `code_template` for paragraphs that are purely commentary
    or stage-direction prose with no nameable value.
+
+   **Preserve units.** When the text mentions a unit (m, cm, kg, s, kW, hr, L,
+   in, ft, lb, °C, $, etc.), encode it using `jkroso/Units.jl` syntax — the
+   unit names are pre-loaded in the sandbox as bare constants. Examples:
+     • "1m" → `1m`     • "9.81 m/s²" → `9.81m/s^2`
+     • "5kg" → `5kg`   • "1 litre" → `1L`
+     • "12 inches" → `12inch` (Imperial) → returns a length value
+   This preserves dimensional analysis through later computations (e.g. a
+   volume in cubic metres can be converted to litres just by writing
+   `volume_m3 |> L`). Only drop units if the paragraph is genuinely
+   dimensionless (counts, percentages, ratios).
 2. Variable names MUST be derived from the noun phrases in the text in
    `snake_case` form (e.g. "the price of a banana" → `banana_price`,
    "the diameter of a sphere" → `sphere_diameter`). When the same noun phrase
@@ -37,12 +48,12 @@ Rules:
 **Examples:**
 
 Paragraph: `"A sphere with a diameter of 1m"`
-→ `code_template`: `sphere_diameter = {{p0}}`
+→ `code_template`: `sphere_diameter = {{p0}}m`
 → `parameters`: `[{id: "p0", text_span: [28, 29], current_value: "1"}]`
 
 Paragraph: `"How many liters is in it?"` (after the sphere paragraph above)
-→ `code_template`: `sphere_volume_liters = (4/3) * π * (sphere_diameter/2)^3 * 1000`
-→ `parameters`: `[]` (no literal values to parameterize)
+→ `code_template`: `sphere_volume = (4/3) * π * (sphere_diameter/2)^3 |> L`
+→ `parameters`: `[]` (no literal values to parameterize; result is a Litre value)
 
 Paragraph: `"This is just a note about my approach"`
 → `code_template`: `""`
