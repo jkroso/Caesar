@@ -436,7 +436,7 @@ function load_translator!()
     Dict{String,Any}()
   end
   # Apply baked-in defaults for missing keys
-  get!(cfg, "llm", "claude-haiku-4-5-20251001")
+  get!(cfg, "llm", "anthropic/claude-haiku-4-5-20251001")
   get!(cfg, "temperature", 0.0)
   get!(cfg, "max_steps", 5)
 
@@ -444,13 +444,20 @@ function load_translator!()
   _TRANSLATOR[] = _build_llm(string(cfg["llm"]))
 end
 
-"Build an LLM instance, resolving the provider via search if no slash is present."
+"""
+Build an LLM instance. Always passes `allowed_providers` to avoid
+LLM.jl's `all_models()` bug (it sorts a Vector-of-Vectors by `.release_date`).
+A model string of "anthropic/claude-..." filters to that provider; an
+unprefixed string falls back to a common-provider list.
+"""
 function _build_llm(model_str::AbstractString)::LLM
   results = if contains(model_str, '/')
-    parts = split(model_str, '/'; limit=2)
-    search(string(parts[1]), string(parts[2]); max_results=1)
+    provider, model = split(model_str, '/'; limit=2)
+    search(string(provider), string(model);
+           max_results=1, allowed_providers=[string(provider)])
   else
-    search("", string(model_str); max_results=1)
+    search("", string(model_str); max_results=1,
+           allowed_providers=["anthropic", "openai", "google", "ollama"])
   end
   isempty(results) && error("No model found matching '$model_str'")
   LLM(results[1], Dict{String,Any}())
