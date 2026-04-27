@@ -4,9 +4,7 @@ Caesar is an AI agent platform built in Julia that uses a Julia REPL as its prim
 
 <img src="./GUI Screenshot.png" alt="GUI screenshot" style=""/>
 
-<video src="./calcs_demo.mp4" controls width="720">
-  Calcs demo — <a href="./calcs_demo.mp4">download the video</a> if it doesn't play inline.
-</video>
+https://github.com/user-attachments/assets/3a969d11-ba84-42d9-bf75-f85bac0c48f6
 
 Using Julia instead of Bash for tool calls means smaller contexts, fewer tokens, and code that's easier to validate statically. The interpreter runs every expression through a safety system that checks filesystem paths, blocks `eval`/`ENV` mutation, and prompts for approval on unknown operations.
 
