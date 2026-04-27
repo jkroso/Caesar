@@ -5,6 +5,7 @@
 @use "./calc_summary" Summary summarize safe_summarize
 @use "github.com/jkroso/Units.jl" => Units
 @use "github.com/jkroso/Units.jl/Imperial" => Imperial
+@use "github.com/jkroso/Units.jl/Money" => Money
 @use Dates...
 @use UUIDs...
 
@@ -18,7 +19,7 @@ const _UNITS_SEEDED = Ref{Bool}(false)
 function _ensure_units_loaded!()
   _UNITS_SEEDED[] && return
   merged = Dict{Symbol,Any}()
-  for src in (Units, Imperial)
+  for src in (Units, Imperial, Money)
     for (k, v) in snapshot(src)
       merged[k] = v
     end
@@ -647,12 +648,40 @@ function _apply_record_result!(para::Paragraph, args::Dict)::Bool
     rp isa Dict || return false
     span = get(rp, "text_span", nothing)
     span isa Vector && length(span) == 2 || return false
+    cv = string(get(rp, "current_value", ""))
+    claimed = (Int(span[1]), Int(span[2]))
     push!(params, Parameter(
       string(get(rp, "id", "")),
-      (Int(span[1]), Int(span[2])),
-      string(get(rp, "current_value", ""))))
+      _snap_span(para.text, claimed, cv),
+      cv))
   end
   para.code_template = code_template
   para.parameters = params
   true
+end
+
+# The translator's byte arithmetic is unreliable — observed off-by-1/2
+# offsets even when `current_value` is correct. Use `current_value` as
+# a search key and snap to its actual byte position in the paragraph.
+# When the value occurs multiple times (e.g. "1" appears in both "1 item"
+# and "6494.19"), pick the occurrence closest to the translator's claim.
+# When `current_value` doesn't appear (whitespace was normalized — e.g.
+# text "2.5 kg" with current_value "2.5kg"), keep the claim unchanged.
+function _snap_span(text::String, claimed::Tuple{Int,Int}, current_value::String)::Tuple{Int,Int}
+  isempty(current_value) && return claimed
+  if 0 <= claimed[1] < claimed[2] <= sizeof(text)
+    actual = String(codeunits(text)[claimed[1]+1:claimed[2]])
+    actual == current_value && return claimed
+  end
+  matches = Int[]
+  i = 1
+  while i <= sizeof(text)
+    j = findnext(current_value, text, i)
+    j === nothing && break
+    push!(matches, first(j) - 1)  # 1-indexed byte → 0-indexed
+    i = first(j) + 1
+  end
+  isempty(matches) && return claimed
+  best = matches[argmin(abs.(matches .- claimed[1]))]
+  (best, best + sizeof(current_value))
 end

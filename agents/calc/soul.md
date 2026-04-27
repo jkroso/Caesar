@@ -26,6 +26,9 @@ Rules:
      • "1m" → `1m`     • "9.81 m/s²" → `9.81m/s^2`
      • "5kg" → `5kg`   • "1 litre" → `1L`
      • "12 inches" → `12inch` (Imperial) → returns a length value
+     • "$50" / "50 USD" → `50USD`   • "6494.19AUD" → `6494.19AUD`
+     • "€10" → `10EUR`   • "£5" → `5GBP`
+     (Currency codes USD, AUD, EUR, GBP, NZD, JPY are bare-loaded too.)
    This preserves dimensional analysis through later computations (e.g. a
    volume in cubic metres can be converted to litres just by writing
    `volume_m3 |> L`). Only drop units if the paragraph is genuinely

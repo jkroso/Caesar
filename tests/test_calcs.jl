@@ -205,6 +205,14 @@ module Units
   Base.:^(a::FakeMeter, n::Integer) = FakeMeter(a.v ^ n)
 end
 module Imperial end
+module Money
+  struct FakeAUD; v::Float64; end
+  Base.show(io::IO, x::FakeAUD) = print(io, x.v, " AUD")
+  const AUD = FakeAUD
+  Base.:*(s::Real, ::Type{FakeAUD}) = FakeAUD(s)
+  Base.:*(s::Real, a::FakeAUD) = FakeAUD(s * a.v)
+  Base.:/(a::FakeAUD, s::Real) = FakeAUD(a.v / s)
+end
 
 include(joinpath(@__DIR__, "..", "calcs.jl"))
 
@@ -389,7 +397,32 @@ println("cascade tests passed")
   @test p.code_template == "x = {{p0}}"
   @test length(p.parameters) == 1
   @test p.parameters[1].id == "p0"
+  # "3" doesn't appear in "hi" — span falls back to translator's claim
   @test p.parameters[1].text_span == (5, 6)
+end
+
+@testset "_snap_span corrects translator byte-offset errors" begin
+  text = "I purchased an item for 6494.19AUD including GST"
+  # Already correct — passthrough
+  @test _snap_span(text, (24, 34), "6494.19AUD") == (24, 34)
+  # Translator off by +2 (the observed real-world bug)
+  @test _snap_span(text, (26, 36), "6494.19AUD") == (24, 34)
+  # Translator off by -3
+  @test _snap_span(text, (21, 31), "6494.19AUD") == (24, 34)
+  # current_value not in text — keep translator's claim untouched
+  @test _snap_span("hi", (5, 6), "3") == (5, 6)
+  # Whitespace was normalized away in current_value — keep claim
+  @test _snap_span("2.5 kg item", (0, 6), "2.5kg") == (0, 6)
+  # Empty current_value — keep claim
+  @test _snap_span(text, (0, 0), "") == (0, 0)
+
+  # Multi-occurrence: pick the match closest to the translator's claim
+  multi = "I purchased 1 item for 6494.19AUD including GST"
+  # "1" appears at byte 12 (count) and byte 28 (inside 6494.19)
+  # Translator claim ~14 (offset by +2) → snap to 12
+  @test _snap_span(multi, (14, 15), "1") == (12, 13)
+  # Translator claim ~30 → snap to 28 (the "1" inside 6494.19)
+  @test _snap_span(multi, (30, 31), "1") == (28, 29)
 end
 
 @testset "_build_translator_input includes prior context" begin
@@ -487,3 +520,6 @@ end
 end
 
 println("scenario + apply! invariant tests passed")
+# Real-LLM scenario tests (currency, count + price → GST round-trip) live
+# in tests/test_calcs_llm.jl — they drive the actual Anthropic translator
+# so they're gated on ANTHROPIC_API_KEY and run separately.
