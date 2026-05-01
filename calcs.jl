@@ -387,14 +387,15 @@ update the paragraph's code_template/parameters in place) and retry once.
 function cascade!(c::Calc, from::Int;
                   on_result=(_,_,_)->nothing,
                   on_error=(_,_,_)->nothing,
-                  translator=nothing)
+                  translator=nothing,
+                  persist::Bool=true)
   lock(c.lock) do
-    _cascade_locked!(c, from; on_result, on_error, translator)
+    _cascade_locked!(c, from; on_result, on_error, translator, persist)
   end
 end
 
 function _cascade_locked!(c::Calc, from::Int;
-                          on_result, on_error, translator)
+                          on_result, on_error, translator, persist::Bool=true)
   isempty(c.snapshots) && build_snapshots!(c)
 
   new_mod = fresh_module(c)
@@ -463,7 +464,7 @@ function _cascade_locked!(c::Calc, from::Int;
   end
 
   c.mod = new_mod
-  save_calc(c)
+  persist && save_calc(c)
 end
 
 # ── Translator (custom mini-agent loop) ──────────────────────────────
