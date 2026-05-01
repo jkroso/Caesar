@@ -50,14 +50,19 @@ Rules:
    right when printed but produces wrong units later. The same trap
    applies to `|> L`, `|> kg`, `|> cm`, etc.
 
-   **If you genuinely need to express a result in a specific unit** (e.g.
-   the user explicitly asks "in litres"), use `convert(TargetUnit, value)`:
-     • `convert(L, 1m^3)` → `1000.0L`
-     • `convert(cm, 1m)` → `100cm`
-   Otherwise, omit the conversion entirely. The user's question often
-   names a unit just for context ("Soil volume is 200m² × 200mm in m³");
-   that's the unit they expect to *see*, but Units.jl will already display
-   the result in a sensible unit derived from the inputs.
+   **If the user names a target unit** — e.g. "in litres", "in m³", "how
+   many kg", "how many trucks at 8m³ each" — wrap the result in
+   `convert(TargetUnit, value)`. Units.jl picks display units from the
+   inputs and may pick a smaller one than the user expects (e.g.
+   `200m² × 200mm` displays as `40,000,000μl`, not `40m³`), so an
+   explicit `convert` is the only way to honour their unit hint. Examples:
+     • `convert(L, sphere_volume)` → litres
+     • `soil_volume = convert(m^3, 200m^2 * 200mm)` → m³
+     • `convert(kg, 5lb)` → kilograms
+   Use `convert(<target>, ...)` rather than `... |> <target>` — the pipe
+   would invoke the type's struct constructor (no conversion).
+   When no target unit is mentioned, omit the convert and let Units.jl
+   pick.
 2. Variable names MUST be derived from the noun phrases in the text in
    `snake_case` form (e.g. "the price of a banana" → `banana_price`,
    "the diameter of a sphere" → `sphere_diameter`). When the same noun phrase
