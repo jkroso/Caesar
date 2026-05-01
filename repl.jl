@@ -261,11 +261,19 @@ end
 Like `interpret`, but returns the actual value of the last expression rather
 than its string representation. Used by the Calcs cascade so that `summarize`
 can dispatch on the real Julia type.
+
+`compile=true` skips JuliaInterpreter and runs the code via `Core.eval`
+in `mod`. Use this when the code has already been safety-validated through
+a prior `interpret_value` call — the cascade replay is the canonical case.
+JuliaInterpreter has long-standing trouble stepping through `@generated`
+function bodies (Units.jl Unit/Unit arithmetic resolves dispatches against
+the wrong world age), and compiled execution sidesteps the issue entirely.
 """
 function interpret_value(mod::Module, code::String;
                          outbox::Union{Channel,Nothing}=nothing,
                          inbox::Union{Channel,Nothing}=nothing,
-                         log::Union{IO,Nothing}=nothing)
+                         log::Union{IO,Nothing}=nothing,
+                         compile::Bool=false)
   parsed = Meta.parseall(code)
   stmts = _flatten_toplevel(parsed)
   assigned = _collect_assigned_vars(stmts)
@@ -277,6 +285,14 @@ function interpret_value(mod::Module, code::String;
     stmts = [_inject_globals(s, assigned) for s in stmts]
   end
   isempty(stmts) && return nothing
+
+  if compile
+    last_result = nothing
+    for stmt in stmts
+      last_result = Core.eval(mod, stmt)
+    end
+    return last_result
+  end
 
   last_result = nothing
   for stmt in stmts

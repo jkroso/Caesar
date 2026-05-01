@@ -414,7 +414,14 @@ function _cascade_locked!(c::Calc, from::Int;
       succeeded = true
     else
       try
-        v = interpret_value(new_mod, code)
+        # `compile=true` runs the recorded code via Core.eval rather than
+        # JuliaInterpreter. The code is already safety-validated — it came
+        # from the translator's `record_result` which only fires after the
+        # agent successfully ran the same code through `interpret_value`
+        # (compile=false) via the eval tool. Compiled execution sidesteps
+        # JuliaInterpreter's @generated-function dispatch issues (e.g.
+        # Units.jl Unit/Unit arithmetic).
+        v = interpret_value(new_mod, code; compile=true)
         s = safe_summarize(v)
         p.last_value_short = s.short
         p.last_value_long = s.long
@@ -427,7 +434,7 @@ function _cascade_locked!(c::Calc, from::Int;
           try
             translator(c, i)
             new_code = render_code(p.code_template, p.parameters)
-            v = interpret_value(new_mod, new_code)
+            v = interpret_value(new_mod, new_code; compile=true)
             s = safe_summarize(v)
             p.last_value_short = s.short
             p.last_value_long = s.long
