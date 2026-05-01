@@ -29,10 +29,35 @@ Rules:
      • "$50" / "50 USD" → `50USD`   • "6494.19AUD" → `6494.19AUD`
      • "€10" → `10EUR`   • "£5" → `5GBP`
      (Currency codes USD, AUD, EUR, GBP, NZD, JPY are bare-loaded too.)
-   This preserves dimensional analysis through later computations (e.g. a
-   volume in cubic metres can be converted to litres just by writing
-   `volume_m3 |> L`). Only drop units if the paragraph is genuinely
-   dimensionless (counts, percentages, ratios).
+   This preserves dimensional analysis through later computations.
+   Only drop units if the paragraph is genuinely dimensionless (counts,
+   percentages, ratios).
+
+   **How units work in Units.jl — read carefully.** Unit names like `m`,
+   `kg`, `m^3`, `L` are Julia *types* (parameterized structs), not callable
+   functions. Multiplying a number by a unit (`200mm`, `5kg`) constructs a
+   value carrying that dimension. **Dimensional algebra is automatic** —
+   you do not need to convert anything for the math to be correct:
+     • `200m^2 * 200mm` already equals `40m³` dimensionally.
+     • `40m³ / 8m³` already cancels to the dimensionless number `5`.
+     • `9.81m/s^2 * 5s` already simplifies to `49.05m/s`.
+   Just write the expression and trust the algebra.
+
+   **NEVER use `|>` to convert between units.** Because unit names are
+   *types*, `value |> m^3` parses as `(m^3)(value)` — the default struct
+   constructor — which wraps the value in an `m^3` shell **without doing
+   any conversion**. The result is a nested-type junk value that looks
+   right when printed but produces wrong units later. The same trap
+   applies to `|> L`, `|> kg`, `|> cm`, etc.
+
+   **If you genuinely need to express a result in a specific unit** (e.g.
+   the user explicitly asks "in litres"), use `convert(TargetUnit, value)`:
+     • `convert(L, 1m^3)` → `1000.0L`
+     • `convert(cm, 1m)` → `100cm`
+   Otherwise, omit the conversion entirely. The user's question often
+   names a unit just for context ("Soil volume is 200m² × 200mm in m³");
+   that's the unit they expect to *see*, but Units.jl will already display
+   the result in a sensible unit derived from the inputs.
 2. Variable names MUST be derived from the noun phrases in the text in
    `snake_case` form (e.g. "the price of a banana" → `banana_price`,
    "the diameter of a sphere" → `sphere_diameter`). When the same noun phrase
@@ -88,8 +113,11 @@ Paragraph: `"There are 12 apples in the basket"`
 (Dimensionless count — no unit to include.)
 
 Paragraph: `"How many liters is in it?"` (after the sphere paragraph above)
-→ `code_template`: `sphere_volume = (4/3) * π * (sphere_diameter/2)^3 |> L`
-→ `parameters`: `[]` (no literal values to parameterize; result is a Litre value)
+→ `code_template`: `sphere_volume = convert(L, (4/3) * π * (sphere_diameter/2)^3)`
+→ `parameters`: `[]`
+(The user explicitly asked for litres, so use `convert(L, ...)`. Without
+that wrapper the result would still be dimensionally correct — Units.jl
+would just print it in m³ instead.)
 
 Paragraph: `"This is just a note about my approach"`
 → `code_template`: `""`
