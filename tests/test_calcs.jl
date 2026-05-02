@@ -24,12 +24,14 @@ include(joinpath(@__DIR__, "..", "calc_summary.jl"))
   @test summarize(nothing).short == "nothing"
   @test summarize(true).short == "true"
   @test summarize(:foo).short == ":foo"
-  # Rationals with denominator 1 should display as the bare integer —
-  # users asking "how many trucks?" want "5", not "5//1".
+  # Rationals are never user-facing: denominator-1 collapses to the
+  # bare integer; everything else displays as the float equivalent.
+  # Nobody asking "how much soil?" wants to read "5//2".
   @test summarize(5//1).short == "5"
   @test summarize(-3//1).short == "-3"
-  @test summarize(3//2).short == "3//2"
-  @test summarize(7//4).short == "7//4"
+  @test summarize(3//2).short == "1.5"
+  @test summarize(7//4).short == "1.75"
+  @test summarize(-5//2).short == "-2.5"
 end
 
 @testset "safe_summarize" begin

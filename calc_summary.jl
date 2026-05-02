@@ -8,12 +8,12 @@ end
 
 summarize(x::Number) = Summary(string(x), nothing)
 
-# A Rational with denominator 1 prints as `5//1`, which is correct Julia
-# but useless to a human — they wrote a question expecting a count, not
-# a fraction. Collapse to the bare integer.
+# Rationals are correct Julia but never what the human wants to read.
+# Collapse to a bare integer when the denominator is 1; otherwise show
+# the floating-point value (so `5//2` → `"2.5"`, not `"5//2"`).
 summarize(x::Rational) = isone(denominator(x)) ?
   Summary(string(numerator(x)), nothing) :
-  Summary(string(x), nothing)
+  Summary(string(float(x)), nothing)
 
 summarize(x::AbstractString) = length(x) <= 60 ?
   Summary(repr(x), nothing) :
