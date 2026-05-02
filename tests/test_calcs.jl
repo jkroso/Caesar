@@ -24,6 +24,12 @@ include(joinpath(@__DIR__, "..", "calc_summary.jl"))
   @test summarize(nothing).short == "nothing"
   @test summarize(true).short == "true"
   @test summarize(:foo).short == ":foo"
+  # Rationals with denominator 1 should display as the bare integer —
+  # users asking "how many trucks?" want "5", not "5//1".
+  @test summarize(5//1).short == "5"
+  @test summarize(-3//1).short == "-3"
+  @test summarize(3//2).short == "3//2"
+  @test summarize(7//4).short == "7//4"
 end
 
 @testset "safe_summarize" begin
@@ -34,10 +40,13 @@ end
   @test occursin("boom", something(s.long, ""))
 end
 
-# Stub interpret and interpret_value before including calcs.jl
+# Stub interpret and interpret_value before including calcs.jl. Both
+# accept arbitrary kwargs so we transparently absorb e.g. `compile=true`
+# (cascade!'s session fast path) without forking the stub on every
+# Caesar internal change.
 module _StubRepl
   interpret(mod, code; kwargs...) = (Core.eval(mod, Meta.parseall(code)); "ok")
-  interpret_value(mod, code) = Core.eval(mod, Meta.parseall(code))
+  interpret_value(mod, code; kwargs...) = Core.eval(mod, Meta.parseall(code))
 end
 # Provide to calcs.jl via @use stub
 const interpret = _StubRepl.interpret
