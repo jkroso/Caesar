@@ -156,6 +156,48 @@ end
   delete_calc(c.id)
 end
 
+# ── Scenario 3: prose-heavy paragraph must not parameterize prepositions ──
+
+@testset "LLM rejects prepositional phrases as parameters" begin
+  # Regression for the "of water" hallucination: the translator picked
+  # "of water" as a parameter with current_value also "of water", which
+  # rendered as `... = of water` and crashed with `UndefVarError: of`.
+  # The only legitimate parameters in this sentence are the three
+  # numeric+unit values: 20kg, 5litres, 25kg.
+  empty!(CALCS)
+  c = create_calc("llm-prose")
+  text = "A 20kg bag of concrete requires 5litres of water making for a total of 25kg of concrete per bag"
+  push!(c.paragraphs, Paragraph(
+    "p1", text, "", Parameter[], nothing, nothing, nothing))
+  translate_and_cascade!(c, 1)
+  _dump(c.paragraphs[1], "prose scenario · ¶1")
+
+  @test c.paragraphs[1].last_error === nothing
+
+  # Every parameter's current_value MUST evaluate cleanly in a
+  # units-seeded sandbox. Catches both syntactically-invalid hallucinations
+  # ("of water" — `of` not defined) AND syntactically-valid-but-
+  # semantically-wrong ones ("2litres" — parses as `2 * litres`, but
+  # `litres` isn't a Units.jl name, so the cascade crashes with
+  # UndefVarError when this current_value gets substituted into code).
+  _ensure_units_loaded!()
+  for p in c.paragraphs[1].parameters
+    @test _is_parseable_param_value(p.current_value)
+  end
+
+  # And every parameter span MUST cover a substring of the original text
+  # that contains at least one digit — i.e. the parameter is anchored
+  # to a numeric literal, not a bare noun phrase.
+  text1 = c.paragraphs[1].text
+  for p in c.paragraphs[1].parameters
+    s = p.text_span
+    @test 0 <= s[1] <= s[2] <= sizeof(text1)
+    @test occursin(r"\d", text1[s[1]+1:s[2]])
+  end
+
+  delete_calc(c.id)
+end
+
 end  # outer @testset "calcs LLM integration"
 
 println("LLM integration tests done")

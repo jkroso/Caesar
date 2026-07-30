@@ -74,6 +74,18 @@ Rules:
    (UTF-8 byte offsets `[start, end)` over the paragraph text) and the literal
    Julia source value.
 
+   **A parameter MUST be a Julia value literal.** Numbers (`12`, `0.5`),
+   unit-multiplied numbers (`20kg`, `5litres`, `200mm`), currency literals
+   (`6494.19AUD`, `50USD`), or quoted strings. Every `current_value` you
+   emit MUST parse as a single Julia expression on its own.
+
+   **Prepositional/noun phrases are NEVER parameters.** English connective
+   tissue like "of water", "of concrete", "per bag", "in the basket" has no
+   numeric value and is NOT something the user can edit to change the
+   answer. If you can't write `current_value` as a Julia literal that would
+   compile on its own, it's not a parameter — leave it as plain text in
+   the template.
+
    **Include the unit inside the parameter span.** When a value has a unit
    (e.g. "5m", "12.5kg", "$3.50", "5 days"), the parameter MUST cover the
    entire value+unit token, and `current_value` MUST be the full Julia source
@@ -127,6 +139,23 @@ would just print it in m³ instead.)
 Paragraph: `"This is just a note about my approach"`
 → `code_template`: `""`
 → `parameters`: `[]`
+
+Paragraph: `"A 20kg bag of concrete requires 5litres of water making for a total of 25kg of concrete per bag"`
+→ `code_template`:
+```
+bag_dry_weight = {{p0}}
+water_volume = {{p1}}
+bag_total_weight = {{p2}}
+```
+→ `parameters`: `[
+    {id: "p0", text_span: [2, 6],   current_value: "20kg"},
+    {id: "p1", text_span: [32, 39], current_value: "5litres"},
+    {id: "p2", text_span: [71, 75], current_value: "25kg"},
+  ]`
+(Only the three numeric+unit values are parameters. "of water", "bag of
+concrete", "of concrete per bag", "for a total of" — these are all
+descriptive prose and stay as literal text in the template. The user
+cannot edit "of water" into a different value, so it is not a parameter.)
 
 Cross-calc references: if a noun phrase is clearly defined in a *different*
 calc that the user is referring to, you may use a fully qualified name like

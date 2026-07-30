@@ -657,6 +657,16 @@ function _apply_record_result!(para::Paragraph, args::Dict)::Bool
     span = get(rp, "text_span", nothing)
     span isa Vector && length(span) == 2 || return false
     cv = string(get(rp, "current_value", ""))
+    # Reject parameters whose current_value isn't a single parseable Julia
+    # expression. Catches LLM hallucinations like current_value="of water"
+    # that would otherwise render to bare-identifier soup at cascade time
+    # (e.g. `total = of water` → UndefVarError: `of` not defined). Failing
+    # the translation surfaces a clean "couldn't turn this into a calc"
+    # to the caller instead of a Julia stack trace.
+    if !_is_parseable_param_value(cv)
+      @warn "record_result: current_value not a Julia literal" current_value=cv
+      return false
+    end
     claimed = (Int(span[1]), Int(span[2]))
     push!(params, Parameter(
       string(get(rp, "id", "")),
@@ -666,6 +676,56 @@ function _apply_record_result!(para::Paragraph, args::Dict)::Bool
   para.code_template = code_template
   para.parameters = params
   true
+end
+
+# A valid parameter `current_value` must (a) consume the entire string
+# as a single Julia expression and (b) be a *literal value* — numbers
+# and arithmetic combinations of numbers with known unit identifiers.
+#
+# Pure syntax isn't enough because `2litres` parses cleanly as `2 *
+# :litres` even though `litres` isn't a defined Units.jl name; without
+# the AST walk that slips through and crashes the cascade with
+# `UndefVarError: litres`. Walking the AST and requiring every bare
+# identifier to be a key in `_UNITS_BINDINGS` (kg, m, L, AUD, ...)
+# catches both "of water" and "2litres".
+function _is_parseable_param_value(v::AbstractString)::Bool
+  s = String(strip(v))
+  isempty(s) && return false
+  expr = try
+    e, pos = Meta.parse(s, 1; raise=false)
+    if e isa Expr && (e.head === :error || e.head === :incomplete)
+      return false
+    end
+    while pos <= ncodeunits(s)
+      isspace(s[pos]) || return false
+      pos = nextind(s, pos)
+    end
+    e
+  catch
+    return false
+  end
+  _ensure_units_loaded!()
+  _is_value_literal(expr, _UNITS_BINDINGS[])
+end
+
+# Recurse an expression tree: accept Real/String/symbol-literal at
+# leaves, accept bare identifiers only when they are known unit names,
+# and inside :call allow only the unit-friendly operators (* / ^ + - %).
+# Chip values aren't expected to reference user-defined paragraph names
+# — those would belong in the code template, not the parameter list.
+function _is_value_literal(e, allowed_units::Dict{Symbol,Any})::Bool
+  e isa Real && return true
+  e isa AbstractString && return true
+  e isa QuoteNode && return true
+  e isa Symbol && return haskey(allowed_units, e)
+  if e isa Expr
+    if e.head === :call && length(e.args) >= 2
+      op = e.args[1]
+      op isa Symbol && op in (:*, :/, :^, :+, :-, :%) || return false
+      return all(a -> _is_value_literal(a, allowed_units), e.args[2:end])
+    end
+  end
+  false
 end
 
 # The translator's byte arithmetic is unreliable — observed off-by-1/2
