@@ -10,6 +10,63 @@
 
 const _INTERP = JuliaInterpreter.RecursiveInterpreter()
 
+# Wall-clock limit for a single eval. Outer max_steps only covers the top
+# frame — nested finish!/evaluate_call! recursion (the usual hang mode) never
+# returns to that loop. TimedInterpreter checks the deadline on every step.
+const DEFAULT_EVAL_TIMEOUT_S = 60.0
+
+# Cooperative cancel: Esc / Stop in the UI sets this; the ReAct loop and the
+# interpreter check it so a stuck eval or multi-step run can exit cleanly.
+const CANCEL_REQUESTED = Ref(false)
+
+"Request that the current agent turn stop as soon as it next yields."
+cancel_agent!() = (CANCEL_REQUESTED[] = true; nothing)
+
+"Clear the cancel flag — call at the start of each user turn."
+reset_agent_cancel!() = (CANCEL_REQUESTED[] = false; nothing)
+
+agent_cancelled() = CANCEL_REQUESTED[]
+
+struct EvalTimeoutError <: Exception
+  seconds::Float64
+end
+Base.showerror(io::IO, e::EvalTimeoutError) =
+  print(io, "eval timed out after $(round(e.seconds; digits=1))s")
+
+struct EvalCancelledError <: Exception end
+Base.showerror(io::IO, ::EvalCancelledError) = print(io, "eval cancelled")
+
+"""Interpreter that aborts when `deadline_ns` is exceeded or cancel is set.
+
+Subtypes `Interpreter` so JuliaInterpreter's recursive call path
+(`evaluate_call!` → `finish_and_return!` → `step_expr!`) keeps our
+instance and re-checks the clock/cancel flag at every nested step — not
+just the top frame Caesar's `_step_frame!` walks.
+"""
+struct TimedInterpreter <: JuliaInterpreter.Interpreter
+  deadline_ns::UInt64
+  timeout_s::Float64
+end
+
+function JuliaInterpreter.step_expr!(interp::TimedInterpreter, frame::Frame,
+                                     istoplevel::Bool=false)
+  agent_cancelled() && throw(EvalCancelledError())
+  if time_ns() > interp.deadline_ns
+    throw(EvalTimeoutError(interp.timeout_s))
+  end
+  # 4-arg form is defined on Interpreter; avoids re-entering this method.
+  step_expr!(interp, frame, pc_expr(frame), istoplevel)
+end
+
+function _make_timed_interp(timeout_s::Real)
+  t = Float64(timeout_s)
+  t <= 0 && (t = DEFAULT_EVAL_TIMEOUT_S)
+  # Clamp to a sane range so a typo can't set nanoseconds or hours.
+  t = clamp(t, 0.1, 600.0)
+  deadline = time_ns() + UInt64(round(t * 1e9))
+  TimedInterpreter(deadline, t)
+end
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 """Extract individual expressions from `Meta.parseall` output, stripping LineNumberNodes."""
@@ -110,19 +167,26 @@ end
 # ── Main interpret function ──────────────────────────────────────────
 
 """
-    interpret(mod::Module, code::String; outbox=nothing, inbox=nothing, log=nothing) -> String
+    interpret(mod::Module, code::String; outbox=nothing, inbox=nothing, log=nothing,
+              timeout=DEFAULT_EVAL_TIMEOUT_S) -> String
 
 Execute `code` in `mod` expression-by-expression via JuliaInterpreter,
 validating every function call through the safety system.
 
 If `log` is provided, writes each input/output pair in REPL-style format.
+Input is flushed *before* evaluation so a hung eval still leaves a forensic trail.
+
+`timeout` is a wall-clock budget (seconds) for the whole eval. Nested recursive
+interpretation is included — see `TimedInterpreter`. Throws `EvalTimeoutError`
+when exceeded (callers that catch generic errors get a string result).
 
 Returns the string representation of the last expression's value.
 """
 function interpret(mod::Module, code::String;
                    outbox::Union{Channel,Nothing}=nothing,
                    inbox::Union{Channel,Nothing}=nothing,
-                   log::Union{IO,Nothing}=nothing)
+                   log::Union{IO,Nothing}=nothing,
+                   timeout::Real=DEFAULT_EVAL_TIMEOUT_S)
   parsed = Meta.parseall(code)
   stmts = _flatten_toplevel(parsed)
   # Inject global declarations into loops for REPL-style soft scope
@@ -137,15 +201,18 @@ function interpret(mod::Module, code::String;
   end
   isempty(stmts) && return "nothing"
 
-  # Log the input
+  # Log the input and flush immediately — a hang mid-eval used to leave an
+  # empty repl.log because println only hits disk after the (never-arriving) result.
   if log !== nothing
     for (i, line) in enumerate(split(code, '\n'))
       println(log, i == 1 ? "julia> $line" : "       $line")
     end
+    flush(log)
   end
 
   last_result = nothing
   error_thrown = nothing
+  interp = _make_timed_interp(timeout)
 
   try
     for stmt in stmts
@@ -164,7 +231,7 @@ function interpret(mod::Module, code::String;
         throw(ErrorException(err_msg))
       end
 
-      last_result = _step_frame!(frame; outbox, inbox)
+      last_result = _step_frame!(frame, interp; outbox, inbox)
     end
   catch e
     if log !== nothing && error_thrown !== e
@@ -186,17 +253,23 @@ function interpret(mod::Module, code::String;
 end
 
 """Step through a single frame, validating calls, and return the final value."""
-function _step_frame!(frame::Frame;
+function _step_frame!(frame::Frame, interp::JuliaInterpreter.Interpreter=_INTERP;
                       outbox::Union{Channel,Nothing}=nothing,
                       inbox::Union{Channel,Nothing}=nothing)
-  max_steps = 10_000  # safety limit
+  max_steps = 10_000  # safety limit (secondary to wall-clock timeout)
 
   for _ in 1:max_steps
+    # Cheap top-frame checks so we don't rely solely on step_expr! dispatch.
+    agent_cancelled() && throw(EvalCancelledError())
+    if interp isa TimedInterpreter && time_ns() > interp.deadline_ns
+      throw(EvalTimeoutError(interp.timeout_s))
+    end
+
     node = pc_expr(frame)
 
     # Check for ReturnNode — extract value and stop
     if node isa Core.ReturnNode
-      return try lookup(_INTERP, frame, node.val) catch; nothing end
+      return try lookup(interp, frame, node.val) catch; nothing end
     end
 
     # Intercept function calls for safety validation
@@ -211,8 +284,11 @@ function _step_frame!(frame::Frame;
       end
     end
 
-    # Execute the step
-    step_expr!(frame, true)
+    # Execute the step — pass interp so nested finish!/evaluate_call! keep
+    # the TimedInterpreter and re-check the deadline every recursive step.
+    # (Previously this was step_expr!(frame, true), which hard-wired
+    # RecursiveInterpreter and made outer max_steps useless against hangs.)
+    step_expr!(interp, frame, true)
   end
 
   nothing
@@ -273,7 +349,8 @@ function interpret_value(mod::Module, code::String;
                          outbox::Union{Channel,Nothing}=nothing,
                          inbox::Union{Channel,Nothing}=nothing,
                          log::Union{IO,Nothing}=nothing,
-                         compile::Bool=false)
+                         compile::Bool=false,
+                         timeout::Real=DEFAULT_EVAL_TIMEOUT_S)
   parsed = Meta.parseall(code)
   stmts = _flatten_toplevel(parsed)
   assigned = _collect_assigned_vars(stmts)
@@ -294,13 +371,31 @@ function interpret_value(mod::Module, code::String;
     return last_result
   end
 
+  if log !== nothing
+    for (i, line) in enumerate(split(code, '\n'))
+      println(log, i == 1 ? "julia> $line" : "       $line")
+    end
+    flush(log)
+  end
+
+  interp = _make_timed_interp(timeout)
   last_result = nothing
-  for stmt in stmts
-    expr = stmt isa Expr ? stmt : Expr(:block, stmt)
-    frame = Frame(mod, expr)
-    last_result = _step_frame!(frame; outbox, inbox)
+  try
+    for stmt in stmts
+      expr = stmt isa Expr ? stmt : Expr(:block, stmt)
+      frame = Frame(mod, expr)
+      last_result = _step_frame!(frame, interp; outbox, inbox)
+    end
+  catch e
+    if log !== nothing
+      println(log, "ERROR: $(sprint(showerror, e))")
+      flush(log)
+    end
+    rethrow()
   end
   last_result
 end
 
-export interpret, interpret_value, TRUSTED_MODULES
+export interpret, interpret_value, TRUSTED_MODULES, EvalTimeoutError,
+       EvalCancelledError, DEFAULT_EVAL_TIMEOUT_S,
+       cancel_agent!, reset_agent_cancel!, agent_cancelled

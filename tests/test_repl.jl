@@ -313,6 +313,93 @@ end
   @test interpret(mod, "x") == "15"
 end
 
+@testset "interpret — outer max_steps bounds tight loops" begin
+  # while/goto loops step the *top* frame, so max_steps (not timeout) is
+  # the primary brake. Must return quickly rather than hang.
+  mod = Module(:test_max_steps)
+  t0 = time()
+  result = interpret(mod, "while true; end"; timeout=30)
+  @test result == "nothing"  # max_steps exhausted → nothing
+  @test time() - t0 < 5
+end
+
+@testset "interpret — cancel_agent! aborts nested eval" begin
+  # Cooperative cancel: flag is checked every interpreter step. Pre-set so we
+  # don't need a second thread (CPU-bound interpret never yields to @async).
+  mod = Module(:test_cancel)
+  interpret(mod, """
+    function spin()
+      i = 0
+      while true
+        i += 1
+      end
+    end
+  """)
+  cancel_agent!()
+  err = try
+    interpret(mod, "spin()"; timeout=30)
+    nothing
+  catch e
+    e
+  end
+  @test err isa EvalCancelledError
+  reset_agent_cancel!()
+end
+
+@testset "interpret — nested finish! still times out" begin
+  # Regression for the hang mode: once evaluate_call! enters a callee,
+  # nested finish! steps that frame forever and never returns to the outer
+  # max_steps loop. A tight loop *inside a function* is the canonical case
+  # (top-level `while true` is bounded by max_steps; this is not).
+  mod = Module(:test_timeout_nested)
+  interpret(mod, """
+    function spin()
+      i = 0
+      while true
+        i += 1
+      end
+    end
+  """)
+  t0 = time()
+  err = try
+    interpret(mod, "spin()"; timeout=0.5)
+    nothing
+  catch e
+    e
+  end
+  elapsed = time() - t0
+  @test err isa EvalTimeoutError
+  @test occursin("timed out", sprint(showerror, err))
+  @test elapsed < 10
+  @test elapsed >= 0.3
+end
+
+@testset "interpret — log flushes input before hang" begin
+  # Forensic trail for "Agent is thinking…" hangs: input must be on disk
+  # even when the eval only finishes via timeout.
+  mod = Module(:test_log_flush)
+  interpret(mod, """
+    function spin()
+      while true; end
+    end
+  """)
+  logpath = tempname("/tmp") * ".log"
+  logfile = open(logpath, "w")
+  try
+    interpret(mod, "spin()"; log=logfile, timeout=0.4)
+  catch
+  end
+  flush(logfile)
+  close(logfile)
+
+  content = read(logpath, String)
+  @test contains(content, "julia> spin()")
+  @test contains(content, "ERROR:")
+  @test contains(content, "timed out")
+
+  rm(logpath)
+end
+
 @testset "interpret — soft scope in while" begin
   mod = Module(:test_softscope_while)
   result = interpret(mod, "n = 0\nwhile n < 10\n    n += 1\nend")

@@ -5,7 +5,7 @@
 @use "github.com/jkroso/LLM.jl/providers/abstract_provider" Message SystemMessage UserMessage AIMessage ToolResultMessage Tool ToolCall FinishReason Image ImageURL ImageData Audio Document
 @use "github.com/jkroso/JSON.jl" parse_json write_json
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
-@use "./repl" interpret interpret_value TRUSTED_MODULES
+@use "./repl" interpret interpret_value TRUSTED_MODULES EvalTimeoutError EvalCancelledError cancel_agent! reset_agent_cancel! agent_cancelled
 @use "./calc_summary"...
 @use "./calcs" load_translator!
 @use "./gateway/mail_auth" MailAuth ensure_token!
@@ -769,9 +769,15 @@ function _process_message(user_input::String, agent::Agent;
 
   max_steps = get(CONFIG, "max_steps", 1000)
   hit_limit = false
+  cancelled = false
   total_input_tokens = 0
   total_output_tokens = 0
+  reset_agent_cancel!()
   for step in 1:max_steps
+    if agent_cancelled()
+      cancelled = true
+      break
+    end
     if step > 1 && step % 5 == 0
       user_names = filter(n -> n != Symbol(agent.repl_module), names(agent.repl_module; all=false))
       if !isempty(user_names)
@@ -808,6 +814,10 @@ function _process_message(user_input::String, agent::Agent;
     # Stream text tokens to outbox
     buf = IOBuffer()
     while !eof(stream)
+      if agent_cancelled()
+        cancelled = true
+        break
+      end
       chunk = String(readavailable(stream))
       !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
     end
@@ -821,6 +831,9 @@ function _process_message(user_input::String, agent::Agent;
       total_output_tokens += Int(output_tok.value)
     catch; end
     close(stream)
+    if cancelled
+      break
+    end
 
     # No tool calls — treat as final text response
     if isempty(tool_calls)
@@ -835,6 +848,10 @@ function _process_message(user_input::String, agent::Agent;
     # Process tool calls
     push!(messages, AIMessage(response_text, tool_calls))
     for tc in tool_calls
+      if agent_cancelled()
+        cancelled = true
+        break
+      end
       result = if tc.name == "eval"
         code = get(tc.arguments, "code", "")
         try
@@ -842,7 +859,14 @@ function _process_message(user_input::String, agent::Agent;
             interpret(agent.repl_module, code; outbox, inbox, log=agent.repl_log)
           end
         catch e
-          e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+          if e isa EvalCancelledError
+            cancelled = true
+            "Stopped."
+          elseif e isa SafetyDeniedError
+            "Safety error: $(sprint(showerror, e))"
+          else
+            "Error: $(sprint(showerror, e))"
+          end
         end
       elseif tc.name == "js"
         js_code = get(tc.arguments, "code", "")
@@ -851,7 +875,14 @@ function _process_message(user_input::String, agent::Agent;
             interpret(agent.repl_module, "js(b, $(repr(js_code)))"; outbox, inbox, log=agent.repl_log)
           end
         catch e
-          e isa SafetyDeniedError ? "Safety error: $(sprint(showerror, e))" : "Error: $(sprint(showerror, e))"
+          if e isa EvalCancelledError
+            cancelled = true
+            "Stopped."
+          elseif e isa SafetyDeniedError
+            "Safety error: $(sprint(showerror, e))"
+          else
+            "Error: $(sprint(showerror, e))"
+          end
         end
       elseif haskey(TOOL_FNS, tc.name)
         # Check confirmation
@@ -881,11 +912,15 @@ function _process_message(user_input::String, agent::Agent;
       log_memory("$(tc.name): $(first(result, 500))"; agent_id=agent.id, conversation_id)
       truncated = length(result) > 4000 ? first(result, 4000) * "\n... (truncated)" : result
       push!(messages, ToolResultMessage(tc.id, truncated))
+      cancelled && break
     end
+    cancelled && break
     step == max_steps && (hit_limit = true)
   end
 
-  if hit_limit
+  if cancelled
+    put!(outbox, AgentMessage("Stopped."))
+  elseif hit_limit
     put!(outbox, AgentMessage("Stopped: reached the maximum of $max_steps steps."))
   end
 
@@ -1095,5 +1130,6 @@ export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
        log_memory,
        route_approval, resolve_approval, check_pending_approvals!,
        primary_adapter, register_adapter!, channel_symbol, send_message,
-       start!
+       start!,
+       cancel_agent!, reset_agent_cancel!, agent_cancelled
 
