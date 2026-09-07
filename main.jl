@@ -7,7 +7,7 @@
 @use "./gateway/mail_api" mail_request mail_send mail_list mail_get mail_mark_read MailAPIError
 @use "./repl" interpret interpret_value TRUSTED_MODULES EvalTimeoutError EvalCancelledError cancel_agent! reset_agent_cancel! agent_cancelled
 @use "./calc_summary"...
-@use "./calcs" load_translator!
+@use "./calcs" load_translator! translator_llm_keys!
 @use "./gateway/mail_auth" MailAuth ensure_token!
 @use "./safety"...
 @use LibGit2
@@ -19,6 +19,19 @@
 @use YAML
 
 # ── Constants set at precompile time ─────────────────────────────────
+#
+# Two roots, because they are two different things and only look alike on a
+# machine where Caesar *is* the checkout in your home directory:
+#
+#   ROOT  the library's own files — tools, commands, skills, the model cache.
+#         These ship with Caesar, so they live wherever this file does.
+#   HOME  the user's data — config.yaml, the memory db, their agents.
+#
+# Both resolved to `~/Caesar` before, which meant that using Caesar as a
+# library from anywhere else went looking for `~/Caesar/tools` and died in
+# `__init__` with ENOENT. They are the same directory in a dev checkout, so
+# this changes nothing there.
+const ROOT = FSPath(@__DIR__)
 const HOME = mkpath(home() * "Caesar")
 const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn" => Logging.Warn, "error" => Logging.Error)
 
@@ -28,7 +41,7 @@ const DB = Ref{SQLite.DB}()
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
-const MODEL_CACHE_PATH = HOME * "model_cache.bin"
+const MODEL_CACHE_PATH = ROOT * "model_cache.bin"
 
 "Save a model info NamedTuple to disk for fast boot"
 function cache_model_info(info::NamedTuple)
@@ -379,7 +392,7 @@ function load_tools!()
   empty!(TOOL_CONFIRM)
   push!(TOOL_DEFS, EVAL_TOOL)
   push!(TOOL_DEFS, JS_TOOL)
-  for file in (HOME*"tools").children
+  for file in (ROOT*"tools").children
     file.extension == "jl" || continue
     mod = include(string(file))
     n = Base.invokelatest(getfield, mod, :name)
@@ -392,7 +405,7 @@ function load_tools!()
 end
 
 # ── Commands ─────────────────────────────────────────────────────────
-const COMMANDS_DIR = HOME * "commands"
+const COMMANDS_DIR = ROOT * "commands"
 const COMMANDS = Dict{String, Module}()
 
 function load_commands!()
@@ -413,7 +426,7 @@ function load_commands!()
 end
 
 # ── Skills ───────────────────────────────────────────────────────────
-const SKILLS_DIR = HOME * "skills"
+const SKILLS_DIR = ROOT * "skills"
 
 struct Skill
   name::String
@@ -983,17 +996,22 @@ function __init__()
   # Skip runtime initialization during precompilation
   Base.generating_output() && return
 
-  # Load config
-  if !isfile(HOME * "config.yaml")
-    YAML.write_file(HOME * "config.yaml", Dict(
+  # Load config. `HOME * "config.yaml"` is an FSPath and both YAML entry points
+  # want a String: `write_file` has no FSPath method, so on any machine where
+  # this file did not exist yet — i.e. every first run — `__init__` threw a
+  # MethodError and an embedder just saw the agent fail to load. `load_file`
+  # below had always converted; the write path had not.
+  cfg = string(HOME * "config.yaml")
+  if !isfile(cfg)
+    YAML.write_file(cfg, Dict(
       "llm" => "qwen3.5:27b",
       "github_token" => "",
-      "allowed_dirs" => [HOME, expanduser("~/projects")],
+      "allowed_dirs" => [string(HOME), expanduser("~/projects")],
       "allowed_commands" => ["ls *", "cat *", "head *", "tail *", "grep *", "find *", "git *", "julia *", "pwd", "echo *", "wc *", "open *", "/Applications/Google Chrome.app/*"],
       "log_level" => "info",
     ))
   end
-  merge!(CONFIG, YAML.load_file(string(HOME * "config.yaml")))
+  merge!(CONFIG, YAML.load_file(cfg))
   Logging.global_logger(Logging.ConsoleLogger(stderr, get(LOG_LEVELS, get(CONFIG, "log_level", "warn"), Logging.Warn)))
 
   # Initialize DB
@@ -1071,15 +1089,29 @@ function __init__()
   load_agents!()
 
   try
+    translator_llm_keys!(CONFIG)
     load_translator!()
     @info "Loaded calc translator agent"
   catch e
     @warn "Failed to load calc translator agent" exception=e
   end
 
-  # Initialize memory providers per agent
+  # Initialize memory providers per agent.
+  #
+  # Memory is opt-in: an agent that does not name a provider gets none. This
+  # defaulted to hindsight, which starts a Docker container per agent, so simply
+  # importing Caesar as a library tried to `docker run` on the host — failing
+  # loudly on every boot anywhere Docker is not installed, for agents that had
+  # never asked for memory. Agents that want it say so (`memory: hindsight`).
+  #
+  # Having no provider is a supported state throughout, not a degraded one:
+  # `search_memories` answers "(no memories yet)" and the retention block in
+  # `process_message` is guarded on the provider existing.
   for (agent_id, agent) in AGENTS
-    provider_name = get(agent.config, "memory", "hindsight")
+    provider_name = get(agent.config, "memory", "none")
+    # Explicit opt-outs stay silent; anything else unrecognised still warns,
+    # so a typo in a config is not mistaken for "memory off".
+    (provider_name === nothing || provider_name in ("none", "off", "")) && continue
     try
       if provider_name == "hindsight"
         hs = @use("./memory/hindsight/hindsight")
