@@ -436,6 +436,31 @@ end
   @test _snap_span(multi, (30, 31), "1") == (28, 29)
 end
 
+@testset "_translator_model keeps Haiku when Anthropic is keyed" begin
+  agent = Dict("llm" => "anthropic/claude-haiku-4-5-20251001")
+  @test _translator_model(agent, Dict{String,Any}()) ==
+        "anthropic/claude-haiku-4-5-20251001"
+  @test _translator_model(agent, Dict{String,Any}("anthropic_key" => "sk-ant")) ==
+        "anthropic/claude-haiku-4-5-20251001"
+end
+
+@testset "_translator_model falls back to the company model when Haiku has no key" begin
+  agent = Dict("llm" => "anthropic/claude-haiku-4-5-20251001")
+  keys = Dict{String,Any}("xai_key" => "xai-1", "llm" => "xai/grok-4")
+  @test _translator_model(agent, keys) == "xai/grok-4"
+end
+
+@testset "translator_llm_keys! stores keys and invalidates only on change" begin
+  translator_llm_keys!(Dict("xai_key" => "a"))
+  @test _TRANSLATOR_LLM_KEYS[]["xai_key"] == "a"
+  _TRANSLATOR[] = LLM()
+  translator_llm_keys!(Dict("xai_key" => "a"))
+  @test _TRANSLATOR[] isa LLM          # identical keys → keep cached LLM
+  translator_llm_keys!(Dict("xai_key" => "b"))
+  @test _TRANSLATOR[] === nothing      # changed keys → rebuild next translate
+  @test _TRANSLATOR_LLM_KEYS[]["xai_key"] == "b"
+end
+
 @testset "_build_translator_input includes prior context" begin
   empty!(CALCS)
   c = create_calc("ctx")

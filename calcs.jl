@@ -476,6 +476,50 @@ end
 const _TRANSLATOR = Ref{Union{LLM,Nothing}}(nothing)
 const _TRANSLATOR_PROMPT = Ref{String}("")
 const _TRANSLATOR_CONFIG = Ref{Dict{String,Any}}(Dict{String,Any}())
+# LLM.jl key slots (`anthropic_key`, `xai_key`, …) plus optional `llm` model
+# override. Callers that keep keys out of ENV (Centient Settings, Caesar
+# CONFIG) must push them here — `_build_llm` used to pass an empty dict, so
+# the translator only ever saw environment variables.
+const _TRANSLATOR_LLM_KEYS = Ref{Dict{String,Any}}(Dict{String,Any}())
+
+"""Supply API keys (and optional `llm` model) for the translator.
+
+Invalidates the cached LLM when the keys or model actually change so the
+next `translate_paragraph` rebuilds against the new credentials. Identical
+re-pushes are a no-op (evaluate-on-every-keystroke must not rebuild)."""
+function translator_llm_keys!(config::AbstractDict)
+  new = Dict{String,Any}(string(k) => v for (k, v) in config)
+  new == _TRANSLATOR_LLM_KEYS[] && return nothing
+  _TRANSLATOR_LLM_KEYS[] = new
+  _TRANSLATOR[] = nothing
+  nothing
+end
+
+_provider_of(model::AbstractString) =
+  contains(model, '/') ? String(first(split(String(model), '/'; limit=2))) : ""
+
+function _has_provider_key(keys::AbstractDict, provider::AbstractString)::Bool
+  isempty(provider) && return false
+  k = get(keys, "$(provider)_key", nothing)
+  k isa AbstractString && !isempty(strip(k))
+end
+
+"""Pick the translator model.
+
+Prefer the calc agent's configured model (cheap Haiku) when that provider
+has a key. Otherwise fall back to `keys["llm"]` (the company's chat model)
+if *that* provider is keyed. Last resort is the agent default — the call
+will 401 and the caller surfaces a missing-key error."""
+function _translator_model(agent_cfg::AbstractDict, keys::AbstractDict)::String
+  preferred = string(get(agent_cfg, "llm", "anthropic/claude-haiku-4-5-20251001"))
+  _has_provider_key(keys, _provider_of(preferred)) && return preferred
+  company = get(keys, "llm", nothing)
+  if company isa AbstractString && !isempty(strip(company)) &&
+     _has_provider_key(keys, _provider_of(company))
+    return String(company)
+  end
+  preferred
+end
 
 function load_translator!()
   agent_dir = home() * "Caesar" * "agents" * "calc"
@@ -497,6 +541,7 @@ function load_translator!()
   get!(cfg, "llm", "anthropic/claude-haiku-4-5-20251001")
   get!(cfg, "temperature", 0.0)
   get!(cfg, "max_steps", 5)
+  cfg["llm"] = _translator_model(cfg, _TRANSLATOR_LLM_KEYS[])
 
   _TRANSLATOR_CONFIG[] = cfg
   _TRANSLATOR[] = _build_llm(string(cfg["llm"]))
@@ -518,7 +563,7 @@ function _build_llm(model_str::AbstractString)::LLM
            allowed_providers=["anthropic", "openai", "google", "ollama"])
   end
   isempty(results) && error("No model found matching '$model_str'")
-  LLM(results[1], Dict{String,Any}())
+  LLM(results[1], _TRANSLATOR_LLM_KEYS[])
 end
 
 translator()::LLM = _TRANSLATOR[] === nothing ? (load_translator!(); _TRANSLATOR[]) : _TRANSLATOR[]
@@ -583,6 +628,10 @@ function _translate_paragraph_locked(c::Calc, idx::Int)::Bool
       translator()(messages; temperature, tools)
     catch e
       @warn "Translator LLM call failed" calc_id=c.id paragraph_idx=idx step exception=(e, catch_backtrace())
+      # Stash the raw error so the caller can tell auth-fail from "the
+      # model couldn't parse this paragraph". calc_eval rewrites 401s
+      # into a Settings prompt; other hosts can do the same.
+      para.last_error = sprint(showerror, e)
       return false
     end
     buf = IOBuffer()

@@ -26,7 +26,8 @@ Rules:
      • "1m" → `1m`     • "9.81 m/s²" → `9.81m/s^2`
      • "5kg" → `5kg`   • "1 litre" → `1L`
      • "12 inches" → `12inch` (Imperial) → returns a length value
-     • "$50" / "50 USD" → `50USD`   • "6494.19AUD" → `6494.19AUD`
+     • "$50" → `50AUD` (bare `$` is the local dollar; this product is Australian)
+     • "50 USD" → `50USD`   • "6494.19AUD" → `6494.19AUD`
      • "€10" → `10EUR`   • "£5" → `5GBP`
      (Currency codes USD, AUD, EUR, GBP, NZD, JPY are bare-loaded too.)
    This preserves dimensional analysis through later computations.
@@ -113,6 +114,24 @@ Rules:
    edit will re-translate with the full text.
 
 **Examples:**
+
+Paragraph: `"one sleeper's volume is 200mm by 80mm by 1800mm"`
+→ `code_template`: `sleeper_volume = convert(m^3, {{p0}} * {{p1}} * {{p2}})`
+→ `parameters`: `[
+    {id: "p0", text_span: [25, 30], current_value: "200mm"},
+    {id: "p1", text_span: [34, 38], current_value: "80mm"},
+    {id: "p2", text_span: [42, 48], current_value: "1800mm"},
+  ]`
+("A by B by C" is a volume — multiply the three lengths. Convert to m³
+so Units.jl doesn't print the product as millions of μl.)
+
+Paragraph: `"concrete cost $300 per cubic metre"`
+→ `code_template`: `concrete_cost = {{p0}} / m^3`
+→ `parameters`: `[{id: "p0", text_span: [14, 18], current_value: "300AUD"}]`
+(`$300` is money — `current_value` is the Julia literal `300AUD` / `300USD`
+matching the user's currency, never the raw `$300` string, which is
+interpolation syntax and will not parse. The span still covers `$300` in
+the source text so the chip shows what the user typed.)
 
 Paragraph: `"A sphere with a diameter of 1m"`
 → `code_template`: `sphere_diameter = {{p0}}`
