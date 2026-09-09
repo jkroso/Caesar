@@ -105,6 +105,13 @@ struct StreamToken
   text::String
 end
 
+"A chunk of the model's reasoning summary, when the provider streams one.
+Separate from `StreamToken` so a reader can show it as thinking rather than
+as something the agent said."
+struct ThinkingToken
+  text::String
+end
+
 struct AgentDone
   input_tokens::Int
   output_tokens::Int
@@ -754,6 +761,13 @@ function process_message(user_input::String, agent::Agent;
   end
 end
 
+"Whatever reasoning-summary text the stream has buffered since last asked."
+function drain_thinking!(stream)
+  hasproperty(stream, :thinking) || return ""
+  bytesavailable(stream.thinking) > 0 || return ""
+  String(readavailable(stream.thinking))
+end
+
 function _process_message(user_input::String, agent::Agent;
                     outbox::Channel, inbox::Channel,
                     auto_allowed=AUTO_ALLOWED_TOOLS,
@@ -824,7 +838,8 @@ function _process_message(user_input::String, agent::Agent;
       break
     end
 
-    # Stream text tokens to outbox
+    # Stream text tokens to outbox — and the reasoning summary alongside,
+    # for providers that write one to the stream's side buffer.
     buf = IOBuffer()
     while !eof(stream)
       if agent_cancelled()
@@ -832,7 +847,12 @@ function _process_message(user_input::String, agent::Agent;
         break
       end
       chunk = String(readavailable(stream))
+      thinking = drain_thinking!(stream)
+      isempty(thinking) || put!(outbox, ThinkingToken(thinking))
       !isempty(chunk) && (write(buf, chunk); put!(outbox, StreamToken(chunk)))
+    end
+    let thinking = drain_thinking!(stream)
+      isempty(thinking) || put!(outbox, ThinkingToken(thinking))
     end
     response_text = String(take!(buf))
     tool_calls = stream.tool_calls
@@ -1154,7 +1174,7 @@ end
 
 export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
        MEMORY_PROVIDERS,
-       Agent, AgentDone, AgentMessage, StreamToken, ToolCallRequest, ToolResult,
+       Agent, AgentDone, AgentMessage, StreamToken, ThinkingToken, ToolCallRequest, ToolResult,
        ToolApproval, Envelope, InboundEnvelope, OutboundEnvelope,
        PresenceRouter,
        default_agent, create_agent!, delete_agent!, update_agent!,

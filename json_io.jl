@@ -69,6 +69,8 @@ function handle_events(outbox::Channel; conversation_id::Union{String,Nothing}=n
     event = take!(outbox)
     if event isa StreamToken
       emit(Dict("type" => "stream_token", "text" => event.text); conversation_id)
+    elseif event isa ThinkingToken
+      emit(Dict("type" => "stream_thinking", "text" => event.text); conversation_id)
     elseif event isa AgentMessage
       emit(Dict("type" => "agent_message", "text" => event.text); conversation_id)
     elseif event isa ToolCallRequest
