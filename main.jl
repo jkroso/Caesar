@@ -18,7 +18,7 @@
 @use UUIDs
 @use YAML
 
-# ── Constants set at precompile time ─────────────────────────────────
+# ── Paths ────────────────────────────────────────────────────────────
 #
 # Two roots, because they are two different things and only look alike on a
 # machine where Caesar *is* the checkout in your home directory:
@@ -31,8 +31,29 @@
 # library from anywhere else went looking for `~/Caesar/tools` and died in
 # `__init__` with ENOENT. They are the same directory in a dev checkout, so
 # this changes nothing there.
-const ROOT = FSPath(@__DIR__)
-const HOME = mkpath(home() * "Caesar")
+#
+# They are set again by `init!`, not only here. A sysimage keeps whatever these
+# held when it was built, so `@__DIR__` and `home()` would name the build
+# machine's directories on every machine the image ships to. An embedder that
+# bakes Caesar into an image ships the library's files somewhere else and says
+# where with `CAESAR_ROOT`.
+global ROOT::FSPath = FSPath(@__DIR__)
+global HOME::FSPath = home() * "Caesar"
+global MODEL_CACHE_PATH::FSPath = ROOT * "model_cache.bin"
+global COMMANDS_DIR::FSPath = ROOT * "commands"
+global SKILLS_DIR::FSPath = ROOT * "skills"
+global AGENTS_DIR::FSPath = HOME * "agents"
+
+function resolve_paths!()
+  global ROOT = FSPath(get(ENV, "CAESAR_ROOT", @__DIR__))
+  global HOME = mkpath(home() * "Caesar")
+  global MODEL_CACHE_PATH = ROOT * "model_cache.bin"
+  global COMMANDS_DIR = ROOT * "commands"
+  global SKILLS_DIR = ROOT * "skills"
+  global AGENTS_DIR = HOME * "agents"
+  nothing
+end
+
 const LOG_LEVELS = Dict("debug" => Logging.Debug, "info" => Logging.Info, "warn" => Logging.Warn, "error" => Logging.Error)
 
 # ── Mutable state initialized at runtime ─────────────────────────────
@@ -41,7 +62,6 @@ const DB = Ref{SQLite.DB}()
 const MAIL_AUTH = Ref{Union{MailAuth, Nothing}}(nothing)
 
 const MEMORY_PROVIDERS = Dict{String, Tuple{Symbol, Any}}()
-const MODEL_CACHE_PATH = ROOT * "model_cache.bin"
 
 "Save a model info NamedTuple to disk for fast boot"
 function cache_model_info(info::NamedTuple)
@@ -412,7 +432,6 @@ function load_tools!()
 end
 
 # ── Commands ─────────────────────────────────────────────────────────
-const COMMANDS_DIR = ROOT * "commands"
 const COMMANDS = Dict{String, Module}()
 
 function load_commands!()
@@ -433,7 +452,6 @@ function load_commands!()
 end
 
 # ── Skills ───────────────────────────────────────────────────────────
-const SKILLS_DIR = ROOT * "skills"
 
 struct Skill
   name::String
@@ -537,7 +555,6 @@ function start!(agent::Agent)
 end
 
 const AGENTS = Dict{String, Agent}()
-const AGENTS_DIR = HOME*"agents"
 
 function load_agent_skills(agent_path::FSPath)::Dict{String, Skill}
   skills = Dict{String, Skill}()
@@ -701,7 +718,7 @@ function build_system_prompt(agent::Agent; active_skill::Union{Skill, Nothing}=n
   memory_section = ""
   if entry !== nothing
     provider, _ = entry
-    prompt_path = joinpath(@__DIR__, "memory", string(provider), "system.md")
+    prompt_path = string(ROOT * "memory" * string(provider) * "system.md")
     if isfile(prompt_path)
       memory_section = "\n" * read(prompt_path, String)
     end
@@ -1012,9 +1029,31 @@ end
 
 # ── Initialization (runs at runtime, not precompile) ─────────────────
 
+"""
+Whether loading Caesar sets it up (`init!`) straight away.
+
+An embedder that bakes Caesar into a sysimage turns this off while it builds the
+image: the image then starts every process with Caesar's code in it but none of
+its setup run — no memory db, no tools compiled — and the embedder calls
+`init!()` when it actually wants an agent. The flag is read at startup, so the
+value set at build time is the one the image carries.
+"""
+const AUTO_INIT = Ref(true)
+const INITIALIZED = Ref(false)
+
 function __init__()
   # Skip runtime initialization during precompilation
   Base.generating_output() && return
+  AUTO_INIT[] && init!()
+end
+
+"""
+Set Caesar up: resolve its paths, load config, open the memory db, and load
+tools, commands, skills and agents. Runs once; later calls do nothing.
+"""
+function init!()
+  INITIALIZED[] && return
+  resolve_paths!()
 
   # Load config. `HOME * "config.yaml"` is an FSPath and both YAML entry points
   # want a String: `write_file` has no FSPath method, so on any machine where
@@ -1170,6 +1209,8 @@ function __init__()
     push!(TRUSTED_MODULES, mod)
   end
 
+  INITIALIZED[] = true
+  nothing
 end
 
 export CONFIG, DB, AGENTS, COMMANDS, SKILLS, HOME, AUTO_ALLOWED_TOOLS,
