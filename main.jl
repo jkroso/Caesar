@@ -576,7 +576,12 @@ function load_agent(agent_dir::FSPath)::Union{Agent, Nothing}
   isfile(soul_path) && isfile(instr_path) || return nothing
   logfile = open(string(agent_dir * "repl.log"), "w")
   mod = Module(Symbol("agent_$id"))
-  Core.eval(mod, :(using Kip))
+  # Hand the REPL the Kip this process already loaded rather than `using Kip`,
+  # which looks it up by name in the active project. A process with no project
+  # that knows Kip — an app running a sysimage — can't resolve the name even
+  # though the module is right here, and the agent failed to load.
+  Core.eval(mod, :(const Kip = $(Kip)))
+  Core.eval(mod, :(using .Kip))
   cfg_path = agent_dir * "config.yaml"
   config = try
     isfile(cfg_path) ? YAML.load_file(string(cfg_path)) : Dict{String, Any}()
