@@ -4,6 +4,7 @@
 # Cookie state persists across sessions via a dedicated user-data-dir.
 
 @use HTTP
+@use "github.com/jkroso/HTTP.jl/client/websocket" WebSocket send receive CLOSE
 @use JSON3
 @use Base64
 @use "github.com/jkroso/Prospects.jl" @property
@@ -60,22 +61,23 @@ function Browser(; port::Int=9222)
 
   @async begin
     try
-      HTTP.WebSockets.open(ws_url) do ws
+      ws = WebSocket(ws_url)
+      try
         responses = Dict{Int, Channel}()
 
         @async begin
           try
             while b.running
-              data = HTTP.WebSockets.receive(ws)
+              data = receive(ws)
+              data.opcode == CLOSE && break
               msg = JSON3.read(String(data))
               if msg isa AbstractDict && haskey(msg, :id)
                 ch = get(responses, msg[:id], nothing)
                 ch !== nothing && put!(ch, msg)
               end
             end
-          catch
-            b.running = false
-          end
+          catch end
+          b.running = false
         end
 
         put!(ready_ch, nothing)
@@ -84,8 +86,10 @@ function Browser(; port::Int=9222)
           b.running || break
           parsed = JSON3.read(json_msg)
           responses[parsed[:id]] = resp_ch
-          HTTP.WebSockets.send(ws, json_msg)
+          send(ws, json_msg)
         end
+      finally
+        close(ws)
       end
     catch
       b.running = false
