@@ -1,7 +1,7 @@
 # gateway/mail_api.jl — Low-level Zoho Mail REST API wrapper
 
 @use "./mail_auth" MailAuth ensure_token!
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" GET POST PUT HTTPError
 @use JSON3
 @use Logging
 
@@ -22,21 +22,21 @@ function mail_request(auth::MailAuth, method::String, path::String;
                       body::Union{String,Nothing}=nothing)
   token = ensure_token!(auth)
   url = "$(auth.base_url)/api/accounts/$(auth.account_id)$(path)"
-  if !isempty(params)
-    url *= "?" * HTTP.URIs.escapeuri(params)
+  query = isempty(params) ? nothing : params
+  meta = ["Authorization" => "Zoho-oauthtoken $token", "Content-Type" => "application/json"]
+  resp = try
+    if method == "GET"
+      GET(url; meta, query, connect_timeout=10, readtimeout=30)
+    elseif method == "PUT"
+      PUT(url; meta, query, data=something(body, ""), connect_timeout=10, readtimeout=30)
+    else
+      POST(url; meta, query, data=something(body, ""), connect_timeout=10, readtimeout=30)
+    end
+  catch e
+    e isa HTTPError || rethrow()
+    throw(MailAPIError(e.status, read(e, String)))
   end
-  headers = ["Authorization" => "Zoho-oauthtoken $token", "Content-Type" => "application/json"]
-  resp = if method == "GET"
-    HTTP.get(url, headers; status_exception=false, connect_timeout=10, readtimeout=30)
-  elseif method == "PUT"
-    HTTP.put(url, headers, something(body, ""); status_exception=false, connect_timeout=10, readtimeout=30)
-  else
-    HTTP.post(url, headers, something(body, ""); status_exception=false, connect_timeout=10, readtimeout=30)
-  end
-  if resp.status >= 400
-    throw(MailAPIError(resp.status, String(resp.body)))
-  end
-  JSON3.read(String(resp.body))
+  JSON3.read(read(resp, String))
 end
 
 # ── Specific API methods ────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # gateway/mail_auth.jl — OAuth 2.0 token management for Zoho Mail API
 
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" POST HTTPError escapeuri
 @use JSON3
 @use Dates...
 @use Logging
@@ -42,17 +42,21 @@ function ensure_token!(auth::MailAuth)::String
     return auth.access_token
   end
   url = "$(auth.auth_url)/oauth/v2/token"
-  resp = HTTP.post(url,
-    ["Content-Type" => "application/x-www-form-urlencoded"],
-    HTTP.URIs.escapeuri(Dict(
-      "grant_type" => "refresh_token",
-      "client_id" => auth.client_id,
-      "client_secret" => auth.client_secret,
-      "refresh_token" => auth.refresh_token
-    ));
-    status_exception=false)
+  form = escapeuri(Dict(
+    "grant_type" => "refresh_token",
+    "client_id" => auth.client_id,
+    "client_secret" => auth.client_secret,
+    "refresh_token" => auth.refresh_token
+  ))
+  resp = try
+    POST(url; meta=["Content-Type" => "application/x-www-form-urlencoded"], data=form)
+  catch e
+    e isa HTTPError || rethrow()
+    e.response  # Zoho explains a refused refresh in the body
+  end
 
-  data = JSON3.read(String(resp.body))
+  text = read(resp, String)
+  data = JSON3.read(text)
   if haskey(data, :access_token)
     auth.access_token = data.access_token
     expires_in = get(data, :expires_in, 3600)
@@ -60,6 +64,6 @@ function ensure_token!(auth::MailAuth)::String
     @debug "Zoho Mail token refreshed, expires in $(expires_in)s"
     return auth.access_token
   else
-    error("OAuth token refresh failed: $(String(resp.body))")
+    error("OAuth token refresh failed: $text")
   end
 end

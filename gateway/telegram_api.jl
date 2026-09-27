@@ -1,6 +1,6 @@
 # gateway/telegram_api.jl — Low-level Telegram Bot API wrapper
 
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" POST HTTPError
 @use JSON3
 @use Logging
 
@@ -21,14 +21,18 @@ Make a request to the Telegram Bot API. Returns the `result` field on success.
 function telegram_request(token::String, method::String, params::Dict=Dict{String,Any}())
   url = "$(TELEGRAM_API_BASE)$(token)/$(method)"
   body = JSON3.write(params)
-  resp = HTTP.post(url,
-      ["Content-Type" => "application/json"],
-      body;
-      status_exception=false,
-      connect_timeout=10,
-      readtimeout=35)  # > long poll timeout (30s)
+  resp = try
+    POST(url;
+         meta=["Content-Type" => "application/json"],
+         data=body,
+         connect_timeout=10,
+         readtimeout=35)  # > long poll timeout (30s)
+  catch e
+    e isa HTTPError || rethrow()
+    e.response  # Telegram describes the failure in the body
+  end
 
-  parsed = JSON3.read(String(resp.body))
+  parsed = JSON3.read(read(resp, String))
   if !get(parsed, :ok, false)
       throw(TelegramAPIError(
           get(parsed, :error_code, resp.status),
