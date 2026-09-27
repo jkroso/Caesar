@@ -1,4 +1,4 @@
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" GET
 
 const CONTAINER_NAME = "prosca-hindsight"
 const IMAGE = "ghcr.io/vectorize-io/hindsight:latest"
@@ -64,7 +64,7 @@ function wait_healthy(port; timeout=30)
   deadline = time() + timeout
   while time() < deadline
     try
-      resp = HTTP.get(url; connect_timeout=2, readtimeout=2)
+      resp = GET(url; connect_timeout=2, readtimeout=2)
       resp.status == 200 && return true
     catch end
     sleep(1)

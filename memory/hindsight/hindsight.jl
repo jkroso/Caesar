@@ -1,5 +1,5 @@
 @use "./docker" ensure_running is_running
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" GET POST PUT DELETE HTTPError
 @use JSON3
 
 struct HindsightConn
@@ -8,18 +8,23 @@ struct HindsightConn
 end
 
 const TENANT = "default"
+const VERBS = Dict("GET" => GET, "POST" => POST, "PUT" => PUT, "DELETE" => DELETE)
 
 function api(conn::HindsightConn, method, path; body=nothing)
   url = "$(conn.url)/v1/$TENANT$path"
-  headers = ["Content-Type" => "application/json"]
-  resp = if body !== nothing
-    HTTP.request(method, url, headers, JSON3.write(body);
-                 connect_timeout=5, readtimeout=120)
-  else
-    HTTP.request(method, url, headers; connect_timeout=5, readtimeout=30)
+  meta = ["Content-Type" => "application/json"]
+  request = VERBS[method]
+  resp = try
+    if body !== nothing
+      request(url; meta, data=JSON3.write(body), connect_timeout=5, readtimeout=120)
+    else
+      request(url; meta, data="", connect_timeout=5, readtimeout=30)
+    end
+  catch e
+    e isa HTTPError || rethrow()
+    error("Hindsight API error $(e.status): $(read(e, String))")
   end
-  resp.status >= 400 && error("Hindsight API error $(resp.status): $(String(resp.body))")
-  JSON3.read(resp.body)
+  JSON3.read(read(resp, String))
 end
 
 function init(agent_id; url="http://localhost:8888", port=8888, admin_port=9999,
