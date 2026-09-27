@@ -44,7 +44,7 @@ The `...` suffix means "import all exports." Kip auto-downloads GitHub dependenc
 
 The ReAct agent loop in `process_message` / `_process_message`:
 1. Builds a system prompt (personality + instructions + tool schemas + skill catalog + memory)
-2. Sends message history to the LLM via `call_llm` (wraps `PromptingTools.aigenerate`)
+2. Streams the message history to the LLM via [jkroso/LLM.jl](https://github.com/jkroso/LLM.jl)
 3. Parses the JSON response and dispatches:
    - `{"eval": "code"}` → runs through `interpret()` in the agent's sandboxed module
    - `{"js": "code"}` → shorthand for browser JS execution
@@ -95,7 +95,7 @@ Two pluggable memory providers per agent (configured in `MEMORY_PROVIDERS`):
 
 ### LLM Support
 
-Multi-provider via PromptingTools.jl — schema auto-detected from model name prefix in `_detect_schema_for()`. Supported: Ollama (local), OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI. Model switching at runtime via `/model`.
+Multi-provider via [jkroso/LLM.jl](https://github.com/jkroso/LLM.jl). Models are `provider/model` strings; `ensure_provider_prefix()` looks up the provider when it's missing and `cached_LLM()` caches model info. Supported: Ollama (local), OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI. Model switching at runtime via `/model`.
 
 ### State & Config
 

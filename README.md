@@ -19,7 +19,7 @@ Using Julia instead of Bash for tool calls means smaller contexts, fewer tokens,
 | Skills | Markdown-defined prompts activated by `/name` — extensible via `~/Caesar/skills/` |
 | Commands | CLI commands via `/name` — model switching, plugin management |
 | Interfaces | TUI (`tui.jl`) with chat + live REPL log pane, CLI (`cli.jl`), Telegram gateway |
-| LLM support | Ollama, OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI via PromptingTools.jl |
+| LLM support | Ollama, OpenAI, Anthropic, Google, Mistral, DeepSeek, xAI via [LLM.jl](https://github.com/jkroso/LLM.jl) |
 
 ## Getting Started
 
