@@ -3,7 +3,7 @@
 # Launches headless Chrome and controls it via CDP over WebSocket.
 # Cookie state persists across sessions via a dedicated user-data-dir.
 
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" GET
 @use "github.com/jkroso/HTTP.jl/client/websocket" WebSocket send receive CLOSE
 @use JSON3
 @use Base64
@@ -33,11 +33,14 @@ function Browser(; port::Int=9222)
     "--disable-extensions"]); wait=false)
 
   # Wait for Chrome to be ready and get a page target
+  # Chrome builds each target's webSocketDebuggerUrl from the Host header, so
+  # it has to carry the port or the socket URL comes back without one.
+  host = ["Host" => "localhost:$port"]
   ws_url = nothing
   for _ in 1:30
     try
-      resp = HTTP.get("http://localhost:$port/json"; retry=false, connect_timeout=1, readtimeout=2)
-      targets = JSON3.read(String(resp.body))
+      resp = GET("http://localhost:$port/json"; meta=host, connect_timeout=1, readtimeout=2)
+      targets = JSON3.read(read(resp, String))
       for t in targets
         if get(t, :type, "") == "page"
           ws_url = string(t[:webSocketDebuggerUrl])
@@ -45,7 +48,7 @@ function Browser(; port::Int=9222)
         end
       end
       if ws_url === nothing
-        HTTP.get("http://localhost:$port/json/new"; retry=false, readtimeout=2)
+        GET("http://localhost:$port/json/new"; meta=host, readtimeout=2)
         continue
       end
       break

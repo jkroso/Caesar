@@ -3,7 +3,7 @@
 # Auto-detects reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile.
 # Sends to capsolver API, polls for solution, injects token into the page.
 
-@use HTTP
+@use "github.com/jkroso/HTTP.jl/client" POST
 @use JSON3
 @use YAML
 @use "./browser" Browser js
@@ -82,10 +82,10 @@ end
 
 function create_task(task::Dict)
   body = JSON3.write(Dict("clientKey" => capsolver_key(), "task" => task))
-  resp = HTTP.post("$CAPSOLVER_API/createTask",
-    ["Content-Type" => "application/json"], body;
+  resp = POST("$CAPSOLVER_API/createTask";
+    meta=["Content-Type" => "application/json"], data=body,
     connect_timeout=10, readtimeout=30)
-  data = JSON3.read(String(resp.body))
+  data = JSON3.read(read(resp, String))
   get(data, :errorId, 1) != 0 && error("Capsolver: $(get(data, :errorCode, "?")) — $(get(data, :errorDescription, ""))")
   string(data.taskId)
 end
@@ -93,10 +93,10 @@ end
 function poll_result(task_id::String; max_polls::Int=40, interval::Int=3)
   for i in 1:max_polls
     body = JSON3.write(Dict("clientKey" => capsolver_key(), "taskId" => task_id))
-    resp = HTTP.post("$CAPSOLVER_API/getTaskResult",
-      ["Content-Type" => "application/json"], body;
+    resp = POST("$CAPSOLVER_API/getTaskResult";
+      meta=["Content-Type" => "application/json"], data=body,
       connect_timeout=10, readtimeout=30)
-    data = JSON3.read(String(resp.body))
+    data = JSON3.read(read(resp, String))
     get(data, :errorId, 1) != 0 && error("Capsolver: $(get(data, :errorCode, "?")) — $(get(data, :errorDescription, ""))")
     string(data.status) == "ready" && return data.solution
     sleep(interval)
